@@ -1,0 +1,62 @@
+# phone-sms-poll: the puller, for gateways that cannot call a webhook.
+#
+# Install:
+#   sudo cp systemd/phone-sms-poll.service /etc/systemd/system/
+#   sudo systemctl edit phone-sms-poll
+#   sudo systemctl enable --now phone-sms-poll
+#
+# It only makes outbound HTTPS requests, so it gets an even smaller sandbox
+# than the receiver: no listening sockets are needed at all.
+
+[Unit]
+Description=phone SMS poller (gateway -> plain text spool)
+Documentation=file:/opt/phone/README.md
+After=network-online.target
+Wants=network-online.target
+# Do not run the poller and a webhook receiver for the same gateway: you would
+# spool every message twice.
+
+[Service]
+Type=simple
+User=phoneuser
+Group=phoneuser
+WorkingDirectory=/opt/phone
+Environment=PYTHONPATH=/opt/phone
+Environment=PYTHONUNBUFFERED=1
+# LoadCredential=poll_token:/etc/phone/sms-poll.token
+ExecStart=/usr/bin/python3 -m sms.poll --config /etc/phone/sms.conf --log-level info
+Restart=always
+RestartSec=15
+TimeoutStopSec=20
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/phoneuser/sms /home/phoneuser/.local/state/phone
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RemoveIPC=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

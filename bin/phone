@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# phone -- one command line for voice, text, and the firewall around them.
+#
+#   phone sip [--init|--check|--print] [call args]   encrypted voice (pjsua)
+#   phone sms <list|read|tail|grep|stats|verify|export|purge|config>
+#   phone smsd [args]                                run the webhook receiver
+#   phone sms-poll [args]                            run the puller
+#   phone firewall [args]                            lockdown / unblock / status
+#   phone doctor                                     preflight checks
+#   phone status                                     what is running right now
+#   phone version
+#
+# No daemon required for reading. Nothing here talks to the network unless you
+# start something that does.
+
+set -euo pipefail
+
+SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SELF_DIR/.." && pwd)"
+PY="${PHONE_PYTHON:-python3}"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    B=$'\033[1m'; D=$'\033[2m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; N=$'\033[0m'
+else
+    B=""; D=""; R=""; G=""; Y=""; C=""; N=""
+fi
+
+py() { PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m "$@"; }
+die()  { printf '%serror%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+usage() {
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+}
+
+# --------------------------------------------------------------------------
+# doctor: prove the parts are present and correctly configured
+# --------------------------------------------------------------------------
+doctor() {
+    local fails=0 warns=0
+    say_ok()   { printf '  %sok  %s %s\n' "$G" "$N" "$*"; }
+    say_warn() { warns=$((warns + 1)); printf '  %s!!  %s %s\n' "$Y" "$N" "$*"; }
+    say_fail() { fails=$((fails + 1)); printf '  %sfail%s %s\n' "$R" "$N" "$*"; }
+
+    printf '%sphone doctor%s\n' "$B" "$N"
+
+    printf '%stext pipeline%s\n' "$C" "$N"
+    if command -v "$PY" >/dev/null 2>&1; then
+        say_ok "interpreter: $("$PY" --version 2>&1)"
+    else
+        say_fail "no $PY on PATH (set PHONE_PYTHON)"
+    fi
+
+    if py sms.daemon --check-config >/dev/null 2>&1; then
+        say_ok "sms config valid ($(py sms.daemon --check-config 2>/dev/null | awk -F': ' '/^spool dir/{print $2}'))"
+    else
+        local why
+        why="$(py sms.daemon --check-config 2>&1 | head -1 || true)"
+        say_warn "sms config not valid yet: ${why:-run 'phone smsd --check-config'}"
+    fi
+
+    local spool_dir
+    spool_dir="$(py sms.cli config 2>/dev/null | awk -F': ' '/^spool dir/{print $2}' || echo "$HOME/sms/incoming")"
+    if [ -d "$spool_dir" ]; then
+        local perms count
+        perms="$(stat -c '%a' "$spool_dir" 2>/dev/null || echo '???')"
+        count="$(find "$spool_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')"
+        case "$perms" in
+            [0-7]00) say_ok "spool $spool_dir mode $perms, $count message(s)" ;;
+            *) say_warn "spool $spool_dir is mode $perms (expected 700): run chmod 700 $spool_dir" ;;
+        esac
+    else
+        say_warn "spool $spool_dir does not exist yet (created on first message)"
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        local port
+        port="$(py sms.daemon --check-config 2>/dev/null | awk -F'[ :]' '/^listen/{print $3}' || echo 8080)"
+        if curl -fsS --max-time 2 "http://127.0.0.1:${port:-8080}/healthz" >/dev/null 2>&1; then
+            say_ok "webhook receiver answering on 127.0.0.1:${port:-8080}"
+        else
+            say_warn "webhook receiver not running (start with: phone smsd)"
+        fi
+    fi
+
+    printf '%svoice%s\n' "$C" "$N"
+    if command -v pjsua >/dev/null 2>&1 || [ -n "${PHONE_PJSUA:-}" ]; then
+        local help_text
+        help_text="$("${PHONE_PJSUA:-pjsua}" --help 2>&1 || true)"
+        case "$help_text" in
+            *--use-srtp*) say_ok "pjsua built with SRTP" ;;
+            *) say_fail "pjsua has no SRTP support: rebuild with install/build-pjsip.sh" ;;
+        esac
+        case "$help_text" in
+            *--use-tls*) say_ok "pjsua built with TLS" ;;
+            *) say_fail "pjsua has no TLS support: rebuild with install/build-pjsip.sh" ;;
+        esac
+        if [ -f "${PHONE_SIP_CONF:-$HOME/.config/phone/sip.conf}" ]; then
+            if "$REPO_DIR/sip/phone.sh" --check >/dev/null 2>&1; then
+                say_ok "SIP configuration passed all hardening checks"
+            else
+                local sip_why
+                sip_why="$("$REPO_DIR/sip/phone.sh" --check 2>&1 | grep -m1 -E '^(error|  !!)' || true)"
+                say_warn "SIP config needs attention: ${sip_why:-run 'phone sip --check'}"
+            fi
+        else
+            say_warn "no SIP config yet: run 'phone sip --init'"
+        fi
+    else
+        say_warn "pjsua not installed (voice unavailable): see install/build-pjsip.sh"
+    fi
+
+    printf '%sfirewall%s\n' "$C" "$N"
+    if command -v nft >/dev/null 2>&1; then
+        say_ok "nftables present"
+        if nft list table inet phone >/dev/null 2>&1; then
+            say_ok "phone lockdown table is loaded"
+        else
+            say_warn "lockdown not applied: phone firewall --sip-host ... --sms-host ... --yes"
+        fi
+    elif command -v iptables >/dev/null 2>&1; then
+        say_warn "iptables present, nftables missing (nft is preferred)"
+    else
+        say_warn "no firewall engine installed (nft or iptables)"
+    fi
+    if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+        say_warn "neither ss nor netstat: cannot verify which ports are bound"
+    fi
+
+    printf '\n%s%d check(s) failed, %d warning(s)%s\n' \
+        "$([ "$fails" -eq 0 ] && printf '%s' "$G" || printf '%s' "$R")" "$fails" "$warns" "$N"
+    [ "$fails" -eq 0 ]
+}
+
+# --------------------------------------------------------------------------
+# status: what is live right now
+# --------------------------------------------------------------------------
+status() {
+    printf '%sphone status%s\n' "$B" "$N"
+
+    local port
+    port="$(py sms.cli config 2>/dev/null | awk -F'[ :]' '/^listen/{print $3}' || echo 8080)"
+    port="${port:-8080}"
+    if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null; then
+        printf '\n'
+    else
+        printf '  receiver : not running (phone smsd)\n'
+    fi
+
+    printf '  spool    : '
+    py sms.cli stats 2>/dev/null | tr '\n' ' ' || printf 'unavailable\n'
+    printf '\n'
+
+    if command -v nft >/dev/null 2>&1 && nft list table inet phone >/dev/null 2>&1; then
+        printf '  firewall : phone lockdown active\n'
+    else
+        printf '  firewall : not locked down\n'
+    fi
+
+    if pgrep -x pjsua >/dev/null 2>&1; then
+        printf '  voice    : pjsua running\n'
+    else
+        printf '  voice    : not running (phone sip)\n'
+    fi
+}
+
+# --------------------------------------------------------------------------
+# dispatch
+# --------------------------------------------------------------------------
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    sip|voice)     exec "$REPO_DIR/sip/phone.sh" "$@" ;;
+    sms)           exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.cli "$@" ;;
+    smsd|smsd-*|receiver) exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.daemon "$@" ;;
+    sms-poll|poll) exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.poll "$@" ;;
+    firewall|fw)   exec "$REPO_DIR/firewall/lockdown.sh" "$@" ;;
+    doctor)        doctor ;;
+    status)        status ;;
+    version|--version|-V)
+        printf 'phone %s\n' "$(py sms.cli --version 2>/dev/null || echo '0.1.0')"
+        printf 'repo  %s\n' "$REPO_DIR"
+        ;;
+    help|--help|-h) usage ;;
+    *) die "unknown command: $cmd (try 'phone help')" ;;
+esac

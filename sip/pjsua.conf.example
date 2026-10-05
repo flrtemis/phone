@@ -1,0 +1,109 @@
+# phone: pjsua configuration -- TLS signalling, mandatory SRTP media
+#
+# Syntax: same as the pjsua command line, one option per line, '#' comments.
+# Options that take a value are written as `--name value`.
+#
+# Do not edit a copy of this file by hand and expect it to work: paths must be
+# absolute (pjsua does not expand `~` or environment variables). Run
+#
+#     phone sip init
+#
+# which renders @HOME@ into your real home directory, installs this file at
+# ~/.config/phone/sip.conf with mode 0600, and leaves the original as a
+# reference. The launcher refuses to start while placeholders remain.
+
+# ---------------------------------------------------------------------------
+# transport: TLS only, and only on one port
+# ---------------------------------------------------------------------------
+# pjsua derives the TLS listener port as (local port + 1) -- see
+# pjsip-apps/src/pjsua/pjsua_app.c: "Set TLS port as TCP port+1",
+# tcp_cfg.port++; pjsua_transport_create(PJSIP_TRANSPORT_TLS, ...).
+#
+# So local port 5060 => TLS on 5061, the standard SIP-over-TLS port. Setting
+# --local-port 5061 here would silently put TLS on 5062 and break both your
+# firewall rules and your provider's expectations. `phone sip --check` verifies
+# this arithmetic and, when ss(8) is available, verifies the port that is
+# actually bound at runtime.
+--local-port 5060
+
+# No plaintext transports. With UDP and TCP disabled the TLS listener on 5061
+# is the only socket pjsua opens for signalling.
+--no-udp
+--no-tcp
+--use-tls
+
+# ---------------------------------------------------------------------------
+# trust: verify the provider, present a client certificate
+# ---------------------------------------------------------------------------
+# PJLIB's OpenSSL backend does NOT use the system trust store: "OpenSSL trusts
+# only the CA certificates the application supplies" (PJSIP docs, SSL/TLS
+# guide). Omitting --tls-ca-file together with --tls-verify-server means
+# verification silently has nothing to verify against -- so both are required
+# here, and the launcher enforces them.
+--tls-ca-file /etc/ssl/certs/ca-certificates.crt
+--tls-verify-server
+
+# Client credentials. Create them with `phone sip init` (sip/gen-certs.sh).
+# The private key must be mode 0600; the launcher refuses otherwise.
+--tls-cert-file @HOME@/.config/phone/tls/client.pem
+--tls-privkey-file @HOME@/.config/phone/tls/client.key
+
+# ---------------------------------------------------------------------------
+# media: SRTP is mandatory, not opportunistic
+# ---------------------------------------------------------------------------
+# --use-srtp 2  = PJMEDIA_SRTP_MANDATORY: a call proceeds only if secure media
+#                 can be established. 1 would be "optional", which downgrades
+#                 silently when the peer does not offer SRTP.
+# --srtp-secure 1 = SRTP requires secure signalling (TLS). Do not set 2 unless
+#                 your account URIs use the sips: scheme -- with plain sip:
+#                 URIs pjsua refuses to set up media at all.
+--use-srtp 2
+--srtp-secure 1
+
+# Media port base. Keep this range aligned with the firewall rules
+# (firewall/lockdown.sh defaults to 4000-4010, the default pjsua window).
+--rtp-port 4000
+
+# DTLS-SRTP key agreement puts no key material in the SDP; SDES puts the SRTP
+# keys in the SDP, protected only by the TLS signalling channel. Prefer DTLS
+# when the provider supports it. Only available in newer pjproject builds --
+# check with: pjsua --help | grep srtp-keying
+#--srtp-keying 1
+
+# ---------------------------------------------------------------------------
+# logging: never dump SIP messages
+# ---------------------------------------------------------------------------
+# Level 5 (pjsua's default) prints full SIP messages, including the SDP that
+# carries SDES SRTP key material, to your log. Level 3 keeps signalling state
+# visible without ever writing message bodies or key material to disk.
+--log-level 3
+--app-log-level 3
+
+# ---------------------------------------------------------------------------
+# your provider -- must be edited before first use
+# ---------------------------------------------------------------------------
+# Every URI that should go over TLS must say so: `;transport=tls`. Without it
+# pjsua resolves the URI for UDP, finds no UDP transport, and fails.
+#
+# Replace the three placeholders below, or put your credentials in
+# ~/.config/phone/sip.secrets and source them (see docs/PROVIDERS.md).
+--registrar sip:sip.YOUR_PROVIDER.example:5061\;transport=tls
+--id sip:YOUR_SIP_USERNAME@sip.YOUR_PROVIDER.example
+--realm YOUR_PROVIDER.example
+--username YOUR_SIP_USERNAME
+--password YOUR_SIP_PASSWORD
+--contact sip:YOUR_SIP_USERNAME@sip.YOUR_PROVIDER.example:5061\;transport=tls
+
+# Keep the registration refresh polite; 300s is well inside most providers'
+# expiry windows and cuts keepalive chatter by ~5x on the default 55s.
+--reg-timeout 300
+
+# Do not send STUN queries to third parties (a metadata leak: the STUN server
+# learns your address, and it is not needed when registering to a provider).
+# --stun-srv and --use-ice are deliberately absent.
+--auto-update-nat 0
+
+# ---------------------------------------------------------------------------
+# optional: run headless, no sound card, media still flows
+# ---------------------------------------------------------------------------
+#--null-audio

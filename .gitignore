@@ -1,0 +1,31 @@
+# --- runtime state: never commit ---
+spool/
+sms/spool/
+*.spool
+state/
+*.state.json
+journal.log
+
+# --- secrets: never commit ---
+*.pem
+*.key
+*.crt
+*.p12
+pjsua.conf
+sms.conf
+.env
+secrets/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- misc ---
+*.log
+*.tmp
+.DS_Store

@@ -1,0 +1,68 @@
+# phone-smsd: the SMS webhook receiver, sandboxed.
+#
+# Install:
+#   sudo cp systemd/phone-smsd.service /etc/systemd/system/
+#   sudo systemctl edit phone-smsd     # set User= and paths for your host
+#   sudo systemctl enable --now phone-smsd
+#
+# The hardening directives below are not decoration: this process parses
+# untrusted input from the network, so it gets no capabilities, no home
+# directory it does not need, a read-only filesystem except for the spool, and
+# no ability to load modules or create devices.
+
+[Unit]
+Description=phone SMS webhook receiver (plain text spool)
+Documentation=file:/opt/phone/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust: the unprivileged account that should own ~/sms/incoming.
+User=phoneuser
+Group=phoneuser
+WorkingDirectory=/opt/phone
+Environment=PYTHONPATH=/opt/phone
+Environment=PYTHONUNBUFFERED=1
+# Keep the token out of the unit file if you prefer:
+#   LoadCredential=token:/etc/phone/sms.token
+#   Environment=PHONE_SMS_TOKEN_FILE=%d/token
+ExecStart=/usr/bin/python3 -m sms.daemon --config /etc/phone/sms.conf --log-level info
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+# --- sandbox -------------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The only writable path this service gets.
+ReadWritePaths=/home/phoneuser/sms
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RemoveIPC=yes
+# The spool is the record: keep logs quiet but available.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

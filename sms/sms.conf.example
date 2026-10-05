@@ -1,0 +1,101 @@
+# phone sms -- configuration
+#
+# Install to ~/.config/phone/sms.conf (mode 0600 if you keep a token in it) or
+# pass another path with --config. Precedence is:
+#
+#     defaults  <  this file  <  PHONE_SMS_* environment  <  command-line flags
+#
+# Every value below is the default, uncommented, so this file is a working
+# configuration as-is. Delete what you do not need.
+
+[daemon]
+# Keep this on loopback. The daemon refuses to bind a public interface unless
+# allow_public_bind is set AND a token AND TLS are configured (fail closed).
+host = 127.0.0.1
+port = 8080
+path = /sms/incoming
+
+# Shared secret. Accepts either `X-Phone-Token: <token>` or
+# `Authorization: Bearer <token>`. Prefer supplying it through the environment
+# (PHONE_SMS_TOKEN) or a systemd credential so it never sits on disk.
+# token = 
+
+# Only enable behind a reverse proxy you control: the X-Forwarded-For header
+# then decides the rate limiter's client key.
+trust_proxy = false
+
+# Required if you bind a non-loopback address; together with token + TLS.
+# allow_public_bind = false
+# tls_cert = /etc/phone/tls/smsd.pem
+# tls_key  = /etc/phone/tls/smsd.key
+
+# Refuse anything larger, and answer with 413. A webhook body has no business
+# being bigger than a text message.
+max_body_bytes = 65536
+
+# Per-client token bucket: burst requests, then at most this many per minute.
+max_burst = 10
+max_requests_per_minute = 60
+
+# Providers retry webhooks. Within this window an identical delivery (same
+# provider message id, or the same content when there is no id) is answered
+# 200 "duplicate" instead of being written twice. 0 disables the check.
+dedupe_window = 300
+dedupe_capacity = 4096
+
+# Read-only JSON listing of recent spooled messages (still token-protected and
+# loopback-only). Set false to remove the endpoint entirely.
+expose_recent = true
+
+[spool]
+dir = ~/sms/incoming
+
+# Fail closed when the spool grows past these caps: the daemon answers 507 and
+# writes nothing rather than filling your disk.
+max_files = 20000
+max_bytes = 268435456
+
+# fsync every message before acknowledging, so an acknowledged text survives a
+# power cut. Set false for a speed gain on cheap flash, at the cost of "the
+# provider thinks it was delivered but the file is empty".
+fsync = true
+
+# Append a metadata-only ledger (journal.log) next to the messages so
+# `phone sms verify` can detect later edits. Content is never journaled.
+journal = true
+
+[fields]
+# Field aliases, first match wins, case-insensitive. Add your provider's keys
+# here or pass them per-request without touching code.
+sender = from,From,sender,msisdn,number,originator,source_address,src
+body = text,body,message,msg,content,txt,Body
+time = timestamp,date,ts,sent_at,received_at,created_at,time
+id = id,message_id,messageId,sid,uuid,guid
+
+[auth]
+# See [daemon] token above; this section exists so the token can live in one
+# obvious place.
+# token = 
+
+[poll]
+# For gateways that cannot push to you. `phone sms-poll` asks this URL for
+# messages; HTTPS is required unless the host is loopback.
+# url = https://sms.example.com/api/v1/messages?since={since}
+method = GET
+interval = 30
+
+# bearer:TOKEN or basic:user:password
+# auth = bearer:YOUR_API_TOKEN
+
+# Where the list of messages lives in the response JSON.
+json_path = messages
+
+# Query parameter used for the cursor when the URL has no {since} placeholder.
+since_param = since
+
+# Extra headers, comma separated.
+# extra_headers = X-Api-Version: 2
+
+# Cursor + seen ids (so restarts never double-spool). Mode 0600, written
+# atomically.
+state_file = ~/.local/state/phone/poll.state.json
