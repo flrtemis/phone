@@ -40,6 +40,7 @@ if __package__ in (None, ""):
 from voice import __version__
 from voice.audio import silence, tone, wav_write
 from voice.audiosocket import AudioSocketServer, MemoryDuplex
+from voice.web import make_server
 from voice.config import VoiceConfig, VoiceConfigError
 from voice.modelfile import PHONE_SYSTEM_PROMPT, render_modelfile, write_modelfile
 from voice.pipeline import (
@@ -284,6 +285,19 @@ def doctor(args) -> int:
                 reporter.warn(f"{conf_dir / name} missing: phone voice provision --dir {conf_dir}")
         reporter.note(f"dial {cfg.ai_extension} from the handset extension {cfg.handset_extension} to reach the agent")
         reporter.note(f"RTP window {cfg.rtp_start}-{cfg.rtp_end} must match the firewall rule exactly")
+
+    reporter.section("remote client")
+    try:
+        cfg.validate_web()
+        if cfg.web_is_loopback:
+            reporter.ok(f"serves on {cfg.web_host}:{cfg.web_port} (loopback only, for a tunnel)")
+        else:
+            reporter.warn(f"serves on {cfg.web_host}:{cfg.web_port} - reachable from the network; keep the token")
+        reporter.ok("TLS configured" if cfg.web_cert else "no TLS: browsers need HTTPS for the microphone, apps do not")
+        reporter.ok("token set" if cfg.web_token else "no token configured yet (generated per run)")
+        reporter.note("start it with: phone voice web   (see docs/REMOTE.md for the away-from-home story)")
+    except VoiceConfigError as exc:
+        reporter.fail(f"remote client: {exc}")
 
     reporter.section("dial safety")
     cases: list[tuple[str, bool]] = [("911", False), ("988", False), ("+1 555 010 9999", False)]
@@ -748,6 +762,126 @@ def call(args) -> int:
     return 0
 
 
+def web(args) -> int:
+    """Serve the remote client: browser page, WebSocket audio, and the small API."""
+    cfg = load_config(args)
+    if args.host:
+        cfg.web_host = args.host
+    if args.port:
+        cfg.web_port = args.port
+    if args.cert:
+        cfg.web_cert = args.cert
+    if args.key:
+        cfg.web_key = args.key
+    if args.allow_remote:
+        cfg.web_allow_remote = True
+    if args.max_calls:
+        cfg.web_max_calls = args.max_calls
+    try:
+        cfg.validate_web()
+    except VoiceConfigError as exc:
+        print(f"error {exc}", file=sys.stderr)
+        return 2
+
+    token_generated = False
+    if not cfg.web_token and args.token is not False:
+        cfg.web_token = args.token or cfg.ensure_web_token()
+        token_generated = True
+
+    asr = build_asr(cfg)
+    llm = build_llm(cfg, model=args.model or "")
+    tts = build_tts(cfg)
+    transcripts = cfg.transcript_path
+    transcripts.mkdir(parents=True, exist_ok=True)
+
+    def session_factory(duplex) -> CallSession:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        transcript_path = transcripts / f"{stamp}-{str(uuid_module.uuid4())[:8]}-remote.jsonl"
+        return CallSession(
+            duplex,
+            asr,
+            llm,
+            tts,
+            session_config(cfg),
+            on_dial=None if args.no_dial else make_dialer(cfg),
+            transcript_path=str(transcript_path),
+            on_event=duplex.send_event,
+            notes_path=cfg.notes_file,
+        )
+
+    dialer = None if args.no_dial else (lambda number: originate(cfg, number, print_command=False))
+    server = make_server(cfg, session_factory, originate=dialer)
+    host, port = server.server_address[0], server.server_address[1]
+    scheme = "https" if cfg.web_cert else "http"
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
+    # The token goes in the URL fragment (never sent to the server, so it stays out
+    # of its logs) unless the operator prefers to keep it off the screen.
+    show_token = cfg.web_token and (token_generated or args.print_token or not cfg.web_token)
+    print(f"phone voice web on {host}:{port} ({'TLS' if cfg.web_cert else 'plain http'})")
+    print(f"  page      : {scheme}://{shown}:{port}/#token={cfg.web_token if show_token else '<your token>'}")
+    print(f"  websocket : {'wss' if cfg.web_cert else 'ws'}://{shown}:{port}/ws?token=<token>")
+    print("  api       : POST /api/call-me | /api/ask | /api/note, GET /api/transcript | /healthz")
+    print(f"  models    : asr={cfg.asr_backend}/{cfg.asr_model} llm={cfg.llm_backend}/{cfg.llm_model} tts={cfg.tts_backend}")
+    if token_generated:
+        print("  token     : generated for this run; set [web] token in the config to keep it")
+    if not cfg.web_cert:
+        print("  note      : a browser needs HTTPS for microphone access; an app inside a")
+        print("              tunnel does not. See docs/REMOTE.md.")
+    if not cfg.owner_destination:
+        print("  note      : no [dial] owner, so 'Ring my phone' is disabled and /api/call-me refuses")
+    print("  stop with Ctrl-C")
+
+    stopping = {"now": False}
+
+    def stop(_signum=None, _frame=None):
+        stopping["now"] = True
+        print("\nshutting down...")
+        server.shutdown()
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGTERM, stop)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    print(f"served {server.calls_accepted} call(s), refused {server.calls_refused}")
+    return 0
+
+
+def note(args) -> int:
+    """Write the note the agent reads at the start of the next call."""
+    cfg = load_config(args)
+    if not cfg.notes_file:
+        print(
+            "notes are disabled: set [logging] notes in the config, e.g. notes = ~/voice/notes.txt",
+            file=sys.stderr,
+        )
+        return 2
+    path = Path(os.path.expanduser(cfg.notes_file))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = " ".join(args.text).strip()
+    if args.show:
+        print(path.read_text(encoding="utf-8").strip() or "(no note)")
+        return 0
+    if args.clear:
+        path.write_text("", encoding="utf-8")
+        print(f"cleared {path}")
+        return 0
+    if not text:
+        print("nothing to write: pass the note as text, or --show/--clear", file=sys.stderr)
+        return 2
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"- {text[:400]}\n")
+    os.chmod(path, 0o600)
+    print(f"noted in {path}: {text[:400]}")
+    print("the agent reads it at the start of the next call, including a call it places to you")
+    return 0
+
+
 def dial_test(args) -> int:
     cfg = load_config(args)
     owner = cfg.owner_destination
@@ -899,6 +1033,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", default="owner", help="only the configured owner destination is accepted")
     p.add_argument("--dry-run", action="store_true", help="print the Asterisk command and stop")
     p.set_defaults(func=call)
+
+    p = sub.add_parser("web", help="serve the browser/app client: call the agent from anywhere")
+    p.add_argument("--host", help="bind address (default 127.0.0.1; see docs/REMOTE.md)")
+    p.add_argument("--port", type=int, help="bind port (default 8443)")
+    p.add_argument("--token", help="access token (default: generated for this run)")
+    p.add_argument("--no-token", dest="token", action="store_const", const=False,
+                   help="disable the token entirely (loopback only)")
+    p.add_argument("--print-token", action="store_true", help="print the token even when it is configured")
+    p.add_argument("--cert", help="TLS certificate chain (PEM); required for a browser microphone on anything but localhost")
+    p.add_argument("--key", help="TLS private key (PEM)")
+    p.add_argument("--allow-remote", action="store_true", help="permit a non-loopback bind (a token is still required)")
+    p.add_argument("--max-calls", type=int, help="concurrent remote calls (default 2)")
+    p.add_argument("--model", help="override the Ollama model")
+    p.add_argument("--no-dial", action="store_true", help="refuse every dial intent, including /api/call-me")
+    p.set_defaults(func=web)
+
+    p = sub.add_parser("note", help="leave a note for the agent to read at the start of the next call")
+    p.add_argument("text", nargs="*", help="the note")
+    p.add_argument("--show", action="store_true", help="print the current note")
+    p.add_argument("--clear", action="store_true", help="delete the current note")
+    p.set_defaults(func=note)
 
     p = sub.add_parser("dial-test", help="prove the model cannot dial anything but the owner")
     p.set_defaults(func=dial_test)

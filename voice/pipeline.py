@@ -463,6 +463,24 @@ def validate_dial_request(request: DialRequest, owner: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _read_notes(path: str, limit: int = 1000) -> str:
+    """Read the caller's note file, refusing to ingest anything enormous.
+
+    A note is untrusted input arriving from a remote client, so it is bounded
+    and it is never executed or parsed - it is appended to the system prompt as
+    text, and the dialling rules that matter are enforced in code, not in the
+    prompt.
+    """
+    if not path:
+        return ""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as handle:
+            text = handle.read(limit + 1)
+    except OSError:
+        return ""
+    return text[:limit].strip()
+
+
 # ----------------------------------------------------------------------
 # the call session
 # ----------------------------------------------------------------------
@@ -524,6 +542,8 @@ class CallSession:
         *,
         on_dial: Optional[Callable[[DialRequest], tuple[bool, str]]] = None,
         transcript_path: Optional[str] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
+        notes_path: str = "",
     ) -> None:
         self.duplex = duplex
         self.asr = asr
@@ -531,7 +551,13 @@ class CallSession:
         self.tts = tts
         self.cfg = config or SessionConfig()
         self.on_dial = on_dial
+        self.on_event = on_event
         self.transcript_path = transcript_path
+        #: A note file, read once at the start of each call. This is how a
+        #: remote client (phone app, web page, a curl from a laptop) leaves
+        #: something for the agent to bring up: "I am driving, keep it short".
+        self.notes_path = notes_path
+        self.notes = _read_notes(notes_path)
         self.history: list[dict] = []
         self.transcript: list[dict] = []
         self.turns: list[TurnTimings] = []
@@ -544,11 +570,22 @@ class CallSession:
     # ---- helpers -----------------------------------------------------
     def _log_turn(self, role: str, text: str) -> None:
         self.transcript.append({"role": role, "text": text, "at": time.time()})
+        if self.on_event is not None:
+            try:
+                self.on_event({"type": "turn", "role": role, "text": text, "at": time.time()})
+            except Exception:  # noqa: BLE001 - a display must never break a call
+                LOG.debug("on_event callback failed", exc_info=True)
 
     def _write_transcript(self) -> None:
         if not self.transcript_path:
             return
         try:
+            # The directory may not exist on a first run (or after the user moved
+            # their transcript directory); creating it here means the first call
+            # is recorded, which is exactly the call people want to read.
+            parent = os.path.dirname(os.path.abspath(self.transcript_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(self.transcript_path, "a", encoding="utf-8") as handle:
                 for entry in self.transcript:
                     handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -748,6 +785,13 @@ class CallSession:
             LOG.info("session end: %s", self.ended_reason or "hangup")
         return self.ended_reason or "hangup"
 
+    def system_prompt(self) -> str:
+        """The configured prompt, plus any note left for this call."""
+        prompt = self.cfg.system_prompt
+        if self.notes:
+            prompt = f"{prompt}\n\nThe caller left this note for you before the call: {self.notes}"
+        return prompt
+
     def _ask_model(self, heard: str, timings: TurnTimings) -> tuple[str, Optional[DialRequest]]:
         """Ask the model, streaming, and cut it off if it will not stop talking."""
         self.history.append({"role": "user", "content": heard})
@@ -758,7 +802,7 @@ class CallSession:
         pieces: list[str] = []
         first_token_at: Optional[float] = None
         try:
-            for delta in self.llm.stream(self.history, self.cfg.system_prompt):
+            for delta in self.llm.stream(self.history, self.system_prompt()):
                 if first_token_at is None:
                     first_token_at = time.monotonic()
                     timings.llm_first_token_ms = (first_token_at - started) * 1000

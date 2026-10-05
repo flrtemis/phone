@@ -74,6 +74,22 @@ class VoiceConfig:
 
     # --- transcripts --------------------------------------------------
     transcript_dir: str = "~/voice/transcripts"
+    #: Optional file the agent reads at the start of every call (a remote client
+    #: can leave a note here).
+    notes_file: str = ""
+
+    # --- remote access (browser / companion app) ----------------------
+    # The AudioSocket bridge is loopback-only and Asterisk dials it. This is the
+    # other transport: your phone's app or browser connects *to* the agent, which
+    # is what makes it work from outside the house without a rented number.
+    web_host: str = "127.0.0.1"
+    web_port: int = 8443
+    web_token: str = ""
+    web_title: str = "phone voice"
+    web_cert: str = ""                     # PEM chain; required for a browser mic
+    web_key: str = ""                      # PEM private key
+    web_allow_remote: bool = False
+    web_max_calls: int = 2
 
     # --- asterisk provisioning ----------------------------------------
     asterisk_dir: str = "/etc/asterisk"
@@ -95,6 +111,36 @@ class VoiceConfig:
     @property
     def transcript_path(self) -> Path:
         return Path(os.path.expanduser(self.transcript_dir))
+
+    @property
+    def web_tls(self) -> tuple[str, str]:
+        return os.path.expanduser(self.web_cert), os.path.expanduser(self.web_key)
+
+    @property
+    def web_is_loopback(self) -> bool:
+        return self.web_host in ("127.0.0.1", "::1", "localhost")
+
+    def validate_web(self) -> None:
+        """Checks that only matter when serving the remote client."""
+        if not (0 <= self.web_port < 65536):
+            raise VoiceConfigError(f"web port out of range: {self.web_port}")
+        if not self.web_is_loopback and not self.web_allow_remote:
+            raise VoiceConfigError(
+                f"refusing to serve the remote client on {self.web_host}: it carries live audio and "
+                "a dialling API. Keep it on loopback behind a tunnel (WireGuard/Tailscale), or set "
+                "web allow_remote = true and use a token - and read docs/REMOTE.md first."
+            )
+        if not self.web_is_loopback and not self.web_token:
+            raise VoiceConfigError("a token is required when the remote client is not on loopback")
+        cert, key = self.web_tls
+        if bool(cert) != bool(key):
+            raise VoiceConfigError("web cert and key must be set together")
+        if cert and not Path(cert).is_file():
+            raise VoiceConfigError(f"web cert not found: {cert}")
+        if key and not Path(key).is_file():
+            raise VoiceConfigError(f"web key not found: {key}")
+        if self.web_max_calls < 1:
+            raise VoiceConfigError("web max_calls must be at least 1")
 
     @property
     def hangup_list(self) -> tuple[str, ...]:
@@ -233,6 +279,16 @@ class VoiceConfig:
         self.speak_dial_refusal = get("dial", "speak_refusal", self.speak_dial_refusal)
 
         self.transcript_dir = get("logging", "transcripts", self.transcript_dir)
+        self.notes_file = get("logging", "notes", self.notes_file)
+
+        self.web_host = get("web", "host", self.web_host)
+        self.web_port = get("web", "port", self.web_port)
+        self.web_token = get("web", "token", self.web_token)
+        self.web_title = get("web", "title", self.web_title)
+        self.web_cert = get("web", "cert", self.web_cert)
+        self.web_key = get("web", "key", self.web_key)
+        self.web_allow_remote = get("web", "allow_remote", self.web_allow_remote)
+        self.web_max_calls = get("web", "max_calls", self.web_max_calls)
 
         self.asterisk_dir = get("asterisk", "dir", self.asterisk_dir)
         self.handset_extension = get("asterisk", "handset_extension", self.handset_extension)
@@ -259,6 +315,12 @@ class VoiceConfig:
             ("PHONE_VOICE_TTS_BINARY", "tts_binary", str),
             ("PHONE_VOICE_OWNER", "owner_destination", str),
             ("PHONE_VOICE_TRANSCRIPTS", "transcript_dir", str),
+            ("PHONE_VOICE_NOTES", "notes_file", str),
+            ("PHONE_VOICE_WEB_HOST", "web_host", str),
+            ("PHONE_VOICE_WEB_PORT", "web_port", int),
+            ("PHONE_VOICE_WEB_TOKEN", "web_token", str),
+            ("PHONE_VOICE_WEB_CERT", "web_cert", str),
+            ("PHONE_VOICE_WEB_KEY", "web_key", str),
             ("PHONE_VOICE_ASTERISK_DIR", "asterisk_dir", str),
             ("PHONE_VOICE_TLS_DIR", "tls_dir", str),
         ):
@@ -270,6 +332,12 @@ class VoiceConfig:
                     raise VoiceConfigError(f"{name} is not valid: {value!r}") from exc
 
     # ------------------------------------------------------------------
+    def ensure_web_token(self) -> str:
+        """Generate a token once and keep it: clients cache it, so it must be stable."""
+        if not self.web_token:
+            self.web_token = secrets.token_urlsafe(24)
+        return self.web_token
+
     def ensure_handset_password(self) -> str:
         """Generate a handset password once, so the SIP app has something sane."""
         if not self.handset_password:
@@ -290,6 +358,10 @@ class VoiceConfig:
             f"barge-in        : {self.barge_in} (threshold {self.barge_in_threshold:.0f})",
             f"owner number    : {self.owner_destination or '<unset: outbound dialling disabled>'}",
             f"transcripts     : {self.transcript_path}",
+            f"notes file      : {self.notes_file or '<unset>'}",
+            f"remote client   : {self.web_host}:{self.web_port} "
+            f"({'TLS' if self.web_cert else 'plain http: only safe inside a tunnel'}), "
+            f"token {self.web_token if (self.web_token and not redact) else ('set' if self.web_token else 'AUTO/absent')}",
             f"asterisk dir    : {self.asterisk_dir}",
             f"handset ext     : {self.handset_extension} ({self.handset_name})",
             f"handset password: {password}",

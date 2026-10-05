@@ -5,13 +5,14 @@ PY ?= python3
 PREFIX ?= /opt/phone
 BINDIR ?= /usr/local/bin
 
-.PHONY: help test test-python test-shell lint doctor install uninstall clean spool-demo
+.PHONY: help test test-python test-shell lint android-lint doctor install uninstall clean spool-demo
 
 help:
 	@echo "make test         run every suite (no root, no network)"
 	@echo "make test-python  python suites only (needs pytest)"
 	@echo "make test-shell   sip + firewall + e2e suites"
 	@echo "make lint         syntax-check shell scripts and byte-compile python"
+	@echo "make android-lint check the Android client without a device (needs gradle)"
 	@echo "make doctor       report the state of this host"
 	@echo "make install      copy to $(PREFIX) and link $(BINDIR)/phone (needs root)"
 	@echo "make spool-demo   deliver a sample message and read it back"
@@ -32,6 +33,17 @@ lint:
 	    bash -n "$$f" && printf 'ok   %s\n' "$$f" || exit 1; \
 	done
 	@$(PY) -m compileall -q sms tests && printf 'ok   python sources compile\n'
+
+android-lint:
+	@if [ -d android ]; then \
+	    if command -v gradle >/dev/null 2>&1; then \
+	        cd android && gradle --quiet lint; \
+	    else \
+	        echo "gradle not installed: the Android client cannot be built here" >&2; \
+	        echo "the Kotlin sources are still checked into android/ (see android/README.md)" >&2; \
+	        exit 1; \
+	    fi; \
+	fi
 
 doctor:
 	@PHONE_PYTHON=$(PY) ./bin/phone doctor

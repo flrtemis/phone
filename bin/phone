@@ -18,6 +18,8 @@
 #   phone voice serve                  answer calls through Asterisk
 #   phone voice call --to owner        have the agent ring your phone
 #   phone voice dial-test              prove the model cannot dial strangers
+#   phone voice web                    call the agent from anywhere over data
+#   phone voice note "text"            brief the agent for the next call
 #
 #   phone firewall [args]              lockdown / unblock / status / rollback
 #   phone doctor                       preflight checks for the whole system
@@ -40,6 +42,7 @@ else
 fi
 
 py() { PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m "$@"; }
+pycode() { PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c "$1"; }
 die()  { printf '%serror%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
 usage() {
@@ -158,6 +161,23 @@ doctor() {
 # --------------------------------------------------------------------------
 # status: what is live right now
 # --------------------------------------------------------------------------
+port_state() { # port -> open | closed
+    # Not the `py` helper: that one runs modules (`python3 -m`), and this needs a
+    # script on stdin with an argument.
+    PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" - "$1" <<'PROBE' 2>/dev/null || echo closed
+import socket, sys
+sock = socket.socket()
+sock.settimeout(0.4)
+try:
+    sock.connect(("127.0.0.1", int(sys.argv[1])))
+    print("open")
+except (OSError, ValueError):
+    print("closed")
+finally:
+    sock.close()
+PROBE
+}
+
 status() {
     printf '%sphone status%s\n' "$B" "$N"
 
@@ -187,13 +207,25 @@ status() {
     fi
 
     if py voice.cli --help >/dev/null 2>&1; then
-        local bridge_port agent_pid
-        bridge_port="$(py -c 'from voice.config import VoiceConfig; print(VoiceConfig.load().port)' 2>/dev/null || echo 9092)"
-        agent_pid="$(pgrep -f 'voice.cli serve' 2>/dev/null | head -1 || true)"
-        if [ -n "$agent_pid" ]; then
-            printf '  agent    : serving on port %s (pid %s)\n' "$bridge_port" "$agent_pid"
+        local bridge_port web_port
+        bridge_port="$(pycode 'from voice.config import VoiceConfig; print(VoiceConfig.load().port)' 2>/dev/null || echo 9092)"
+        web_port="$(pycode 'from voice.config import VoiceConfig; print(VoiceConfig.load().web_port)' 2>/dev/null || echo 8443)"
+        # Probe the ports rather than grepping for a process: a stale pid or a
+        # pattern matching this script's own command line both lie, and "is
+        # something listening" is the question being asked.
+        if [ "$(port_state "$bridge_port")" = "open" ]; then
+            printf '  agent    : listening on port %s (Asterisk connects here)\n' "$bridge_port"
         else
             printf '  agent    : not running (phone voice serve -> port %s)\n' "$bridge_port"
+        fi
+        if [ "$(port_state "$web_port")" = "open" ]; then
+            if curl -fsS --max-time 2 "http://127.0.0.1:$web_port/healthz" >/dev/null 2>&1; then
+                printf '  remote   : serving on port %s (browser + companion app)\n' "$web_port"
+            else
+                printf '  remote   : port %s is open, but it is not the voice web server\n' "$web_port"
+            fi
+        else
+            printf '  remote   : not running (phone voice web -> port %s)\n' "$web_port"
         fi
     else
         printf '  agent    : not available\n'

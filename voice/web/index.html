@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow">
+<title>phone voice</title>
+<style>
+  :root { color-scheme: dark; --fg: #d8dee9; --dim: #7a869a; --bg: #0f1218;
+          --panel: #161b24; --line: #26303f; --accent: #7fd1a8; --warn: #e6b45c; --bad: #e6746b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         display: flex; flex-direction: column; align-items: center; padding: 20px 16px 40px; }
+  main { width: 100%; max-width: 620px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; margin: 0 0 4px; color: var(--accent); }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  button { font: inherit; color: var(--fg); background: #1e2633; border: 1px solid var(--line);
+           border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #17352a; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button.danger { background: #35201e; border-color: var(--bad); color: var(--bad); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  .dot.live { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .dot.err { background: var(--bad); }
+  .dot.wait { background: var(--warn); }
+  #meter { height: 6px; background: #0b0e13; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; flex: 1; min-width: 120px; }
+  #meter > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .06s linear; }
+  #log { height: 210px; overflow-y: auto; font-size: 13px; }
+  #log p { margin: 0 0 8px; }
+  #log .who { color: var(--dim); }
+  #log .you .who { color: var(--warn); }
+  #log .sys { color: var(--dim); font-style: italic; }
+  .keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .keys button { padding: 12px 0; font-size: 16px; }
+  textarea { width: 100%; background: #0b0e13; color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+             padding: 10px; font: inherit; font-size: 13px; resize: vertical; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .bad { color: var(--bad); } .warn { color: var(--warn); } .ok { color: var(--accent); }
+  details summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>phone voice</h1>
+  <div class="sub">local model, your line — audio never leaves your network</div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:12px">
+      <span class="status"><span class="dot" id="dot"></span><span id="state">idle</span></span>
+      <span id="meter"><i></i></span>
+    </div>
+    <div class="row">
+      <button class="primary" id="connect">Call the agent</button>
+      <button class="danger hidden" id="hangup">Hang up</button>
+      <button id="mute" disabled>Mute</button>
+      <button id="callme" title="Ask the agent to ring your own phone number">Ring my phone</button>
+    </div>
+    <div class="hint" id="setup-hint"></div>
+    <div class="hidden" id="token-box" style="margin-top:12px">
+      <input id="token" type="password" placeholder="access token" autocomplete="off"
+             style="width:100%;background:#0b0e13;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit">
+      <div class="hint">From <code>phone voice web</code> on your server, or the URL it printed.</div>
+    </div>
+  </div>
+
+  <div class="card" id="transcript-card">
+    <div id="log"><p class="sys">Not connected.</p></div>
+  </div>
+
+  <details class="card">
+    <summary>keypad, notes, and what this connection is</summary>
+    <div class="keys" style="margin-top:14px">
+      <button data-digit="1">1</button><button data-digit="2">2</button><button data-digit="3">3</button>
+      <button data-digit="4">4</button><button data-digit="5">5</button><button data-digit="6">6</button>
+      <button data-digit="7">7</button><button data-digit="8">8</button><button data-digit="9">9</button>
+      <button data-digit="*">*</button><button data-digit="0">0</button><button data-digit="#">#</button>
+    </div>
+    <div style="margin-top:14px">
+      <textarea id="note" rows="3" placeholder="Leave a note: the agent reads it at the start of the next call."></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="save-note">Save note</button>
+        <span class="hint" id="note-state"></span>
+      </div>
+    </div>
+    <div class="hint" id="about" style="margin-top:14px"></div>
+  </details>
+</main>
+
+<script>
+"use strict";
+/* A voice client with no dependencies, because the point of this project is that
+   nothing here needs a vendor.
+
+   Audio path: microphone -> AudioWorklet (Int16 at the context's rate) -> WebSocket
+   -> server, which resamples to 8 kHz for the VAD, whisper and the model. Coming
+   back: Int16 frames -> scheduled AudioBufferSourceNodes. The scheduling (rather
+   than "play as it arrives") is what stops a jittery mobile connection from
+   sounding like a scratched record.
+
+   Capture asks for an 8 kHz context first: then no resampling happens anywhere and
+   the framing is exactly 320 samples per 20 ms, which is what the server's VAD
+   expects. Safari and some Android browsers refuse that rate, so we fall back to
+   the device rate and declare it in the hello — the server resamples. */
+
+const TARGET_RATE = 8000;
+const FRAME_SAMPLES = 320;   // 20 ms at 8 kHz
+const $ = (id) => document.getElementById(id);
+const logEl = $("log"), dotEl = $("dot"), stateEl = $("state"), meterEl = $("meter").firstElementChild;
+
+let ws = null, ctx = null, rate = TARGET_RATE, playhead = 0;
+let captureNode = null, micStream = null, muted = false, connected = false;
+let pcmQueue = [];       // Int16Array chunks awaiting a whole frame
+let queuedSamples = 0;
+
+/* --- token ------------------------------------------------------------------ */
+/* The server prints a URL with the token in the fragment: fragments are never sent
+   to the server, so the token stays out of its logs. Keep it in localStorage so a
+   refresh does not ask again. */
+function readToken() {
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+  if (hash.has("token")) {
+    localStorage.setItem("phone-voice-token", hash.get("token"));
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  return localStorage.getItem("phone-voice-token") || "";
+}
+
+/* --- log ------------------------------------------------------------------- */
+function say(text, cls) {
+  const p = document.createElement("p");
+  if (cls) p.className = cls;
+  p.textContent = text;
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function turn(who, text) {
+  const p = document.createElement("p");
+  p.className = who === "user" ? "you" : "agent";
+  const label = document.createElement("span");
+  label.className = "who";
+  label.textContent = (who === "user" ? "you: " : "agent: ");
+  p.appendChild(label);
+  p.appendChild(document.createTextNode(text));
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setState(text, cls) { stateEl.textContent = text; dotEl.className = "dot" + (cls ? " " + cls : ""); }
+
+/* --- audio in -------------------------------------------------------------- */
+const WORKLET_SRC = `
+class Capture extends AudioWorkletProcessor {
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (channel) {
+      const pcm = new Int16Array(channel.length);
+      for (let i = 0; i < channel.length; i++) {
+        const s = Math.max(-1, Math.min(1, channel[i]));
+        pcm[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor("capture", Capture);
+`;
+
+function toInt16(floats) {
+  const pcm = new Int16Array(floats.length);
+  for (let i = 0; i < floats.length; i++) {
+    const s = Math.max(-1, Math.min(1, floats[i]));
+    pcm[i] = s < 0 ? s * 32768 : s * 32767;
+  }
+  return pcm;
+}
+
+function meterFrom(int16) {
+  let sum = 0;
+  for (let i = 0; i < int16.length; i++) sum += int16[i] * int16[i];
+  const rms = Math.sqrt(sum / Math.max(1, int16.length));
+  meterEl.style.width = Math.min(100, (rms / 6000) * 100) + "%";
+  return rms;
+}
+
+function sendFrame(pcm) {
+  if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!muted) ws.send(pcm.buffer);
+  meterFrom(pcm);
+}
+
+function flushFrames() {
+  while (queuedSamples >= FRAME_SAMPLES) {
+    const frame = new Int16Array(FRAME_SAMPLES);
+    let offset = 0;
+    while (offset < FRAME_SAMPLES && pcmQueue.length) {
+      const head = pcmQueue[0];
+      const take = Math.min(head.length, FRAME_SAMPLES - offset);
+      frame.set(head.subarray(0, take), offset);
+      offset += take;
+      if (take === head.length) pcmQueue.shift(); else pcmQueue[0] = head.subarray(take);
+    }
+    queuedSamples -= FRAME_SAMPLES;
+    sendFrame(frame);
+  }
+}
+
+function onChunk(pcm) {
+  pcmQueue.push(pcm);
+  queuedSamples += pcm.length;
+  flushFrames();
+}
+
+async function startCapture() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,   // essential: otherwise the agent hears itself
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  try {
+    ctx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: "interactive" });
+  } catch (err) {
+    ctx = new AudioContext();
+  }
+  rate = ctx.sampleRate || TARGET_RATE;
+  await ctx.resume();
+  const source = ctx.createMediaStreamSource(micStream);
+
+  if (ctx.audioWorklet) {
+    const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    captureNode = new AudioWorkletNode(ctx, "capture");
+    captureNode.port.onmessage = (event) => onChunk(new Int16Array(event.data));
+    source.connect(captureNode);
+  } else {
+    // Safari before AudioWorklet in this configuration: the deprecated node still
+    // works everywhere and this is not a hot path worth a polyfill for.
+    captureNode = ctx.createScriptProcessor(2048, 1, 1);
+    captureNode.onaudioprocess = (event) => onChunk(toInt16(event.inputBuffer.getChannelData(0)));
+    source.connect(captureNode);
+    captureNode.connect(ctx.destination);
+  }
+}
+
+/* --- audio out ------------------------------------------------------------- */
+function playPCM(buffer) {
+  const samples = new Int16Array(buffer);
+  if (!samples.length) return;
+  const floats = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) floats[i] = samples[i] / 32768;
+  const audio = ctx.createBuffer(1, floats.length, rate);
+  audio.copyToChannel(floats, 0);
+  const node = ctx.createBufferSource();
+  node.buffer = audio;
+  node.connect(volume());
+  const now = ctx.currentTime;
+  if (playhead < now + 0.02) playhead = now + 0.06;   // 60 ms cushion against jitter
+  if (playhead > now + 1.0) playhead = now + 0.06;    // never fall minutes behind
+  node.start(playhead);
+  playhead += audio.duration;
+}
+let outGain = null;
+function volume() {
+  if (!outGain) { outGain = ctx.createGain(); outGain.connect(ctx.destination); }
+  return outGain;
+}
+
+/* --- connection ------------------------------------------------------------ */
+function tokenFromUI() {
+  const box = $("token-box"), input = $("token");
+  let token = readToken();
+  if (!token) {
+    box.classList.remove("hidden");
+    token = (input.value || "").trim();
+    if (token) localStorage.setItem("phone-voice-token", token);
+  }
+  return token;
+}
+
+async function connect() {
+  if (!window.isSecureContext) {
+    say("This page needs HTTPS for microphone access. Use https:// (or localhost), " +
+        "or connect from the companion app inside a VPN.", "sys");
+    setState("insecure context", "err");
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    say("This browser has no microphone API.", "sys");
+    return;
+  }
+  const token = tokenFromUI();
+  if (!token) {
+    say("Paste the access token from `phone voice web`, then press Call again.", "sys");
+    return;
+  }
+  setState("connecting…", "wait");
+  try {
+    await startCapture();
+  } catch (err) {
+    say("Microphone refused: " + err.message, "sys");
+    setState("no microphone", "err");
+    return;
+  }
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(token));
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    connected = true;
+    ws.send(JSON.stringify({ type: "hello", sample_rate: rate }));
+    setState("live " + rate + " Hz", "live");
+    $("connect").classList.add("hidden");
+    $("hangup").classList.remove("hidden");
+    $("mute").disabled = false;
+    say("Connected. Say something.", "sys");
+  };
+  ws.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      let msg = null;
+      try { msg = JSON.parse(event.data); } catch (e) { return; }
+      if (msg.type === "ready") { return; }   // rate stayed as declared in the hello
+      if (msg.type === "turn") { turn(msg.role, msg.text); return; }
+      if (msg.type === "bye") { say("Call ended: " + (msg.reason || "hangup"), "sys"); return; }
+      return;
+    }
+    playPCM(event.data);
+  };
+  ws.onerror = () => { say("Connection error.", "sys"); };
+  ws.onclose = (event) => { hangupLocal(event.code === 1000 ? "ended" : "disconnected (code " + event.code + ")"); };
+}
+
+function hangupLocal(why) {
+  connected = false;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  ws = null;
+  if (micStream) { micStream.getTracks().forEach((track) => track.stop()); micStream = null; }
+  if (ctx) { ctx.close(); ctx = null; }
+  captureNode = null; outGain = null; playhead = 0; pcmQueue = []; queuedSamples = 0;
+  meterEl.style.width = "0%";
+  $("connect").classList.remove("hidden");
+  $("hangup").classList.add("hidden");
+  $("mute").disabled = true;
+  $("mute").textContent = "Mute";
+  muted = false;
+  setState(why || "idle", why === "ended" ? "" : "err");
+}
+
+function hangup() {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "hangup" }));
+  hangupLocal("ended");
+}
+
+/* --- the small API --------------------------------------------------------- */
+async function api(path, body) {
+  const token = readToken() || localStorage.getItem("phone-voice-token") || "";
+  const response = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+  return payload;
+}
+
+/* --- wiring ---------------------------------------------------------------- */
+$("connect").onclick = connect;
+$("hangup").onclick = hangup;
+$("mute").onclick = () => {
+  muted = !muted;
+  $("mute").textContent = muted ? "Unmute" : "Mute";
+  say(muted ? "Microphone muted." : "Microphone live.", "sys");
+};
+document.querySelectorAll("[data-digit]").forEach((button) => {
+  button.onclick = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "dtmf", digit: button.dataset.digit }));
+    say("pressed " + button.dataset.digit, "sys");
+  };
+});
+$("callme").onclick = async () => {
+  $("callme").disabled = true;
+  try {
+    const result = await api("/api/call-me", { to: "owner" });
+    say(result.detail || "Ringing your phone — answer it and the agent is on the line.", "sys");
+  } catch (err) {
+    say("Could not place the call: " + err.message, "sys");
+  } finally {
+    $("callme").disabled = false;
+  }
+};
+$("save-note").onclick = async () => {
+  try {
+    await api("/api/note", { text: $("note").value });
+    $("note-state").textContent = "saved — the agent will read it at the start of the next call";
+    $("note").value = "";
+  } catch (err) {
+    $("note-state").textContent = "not saved: " + err.message;
+  }
+};
+
+/* --- first-run information -------------------------------------------------- */
+(async function init() {
+  const token = readToken();
+  try {
+    const info = await api("/api/config");
+    $("about").textContent =
+      "Connected to " + location.host + (info.title ? " (" + info.title + ")" : "") +
+      ". Audio is carried over this socket to your own server; nothing is sent anywhere else. " +
+      (info.dialling ? "Dialling out is enabled for your configured number." :
+                       "Dialling out is disabled (no owner number configured).");
+    document.title = info.title || "phone voice";
+  } catch (err) {
+    $("about").textContent = "Server said: " + err.message;
+  }
+  if (!token) $("token-box").classList.remove("hidden");
+  if (!window.isSecureContext) {
+    setState("insecure context", "err");
+    say("Microphone access needs HTTPS. Serve this over TLS (a Tailscale/Let's Encrypt cert), " +
+        "or use the companion app inside a WireGuard tunnel.", "sys");
+  }
+})();
+</script>
+</body>
+</html>

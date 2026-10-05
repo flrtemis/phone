@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">phone voice</string>
+    <string name="server_hint">wss://your-server:8443</string>
+    <string name="token_hint">access token</string>
+    <string name="call">Call the agent</string>
+    <string name="hangup">Hang up</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Unmute</string>
+    <string name="ring_phone">Ring my phone</string>
+    <string name="note_hint">Leave a note: the agent reads it at the start of the next call.</string>
+    <string name="save_note">Save note</string>
+    <string name="settings">Server</string>
+    <string name="notification_channel">Voice call</string>
+    <string name="notification_text">Microphone live: talking to your agent</string>
+</resources>

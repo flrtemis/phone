@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is disabled by default: the app talks to your server over TLS, and a
+  plaintext WebSocket carrying live audio should require a deliberate decision.
+
+  The one exception is cleartext *inside a VPN*: Tailscale uses 100.64.0.0/10 and
+  WireGuard typically something like 10.x. If you run the agent on plain HTTP
+  behind a tunnel (which is the cheapest way to get the app working, since a
+  native app has no getUserMedia rule to satisfy), uncomment the block below.
+
+  Trusting your own CA is the other half: install ca-cert.pem as a user
+  certificate on the device (Settings -> Security -> Encryption & credentials ->
+  Install a certificate -> CA certificate). Do not add
+  <certificates src="user"/> here to silence a verification error - fix the trust
+  chain instead.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">100.64.0.0/10</domain>
+    </domain-config>
+    -->
+</network-security-config>

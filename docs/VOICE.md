@@ -213,6 +213,12 @@ without the phone system in the way.
 **Answering** is what `phone voice serve` does: Asterisk connects, the greeting
 plays, and the turn loop runs until either side hangs up.
 
+**Away from home** you have two options, and `docs/REMOTE.md` covers both: a
+rented DID bridges a real phone call into the same Asterisk (your carrier number,
+per-minute cost), or `phone voice web` carries the same conversation over a data
+connection with no telephone company involved and no app to install. The second
+is what the companion app in `android/` speaks.
+
 **Calling out** has two entry points, and both go through the same validation:
 
 ```bash
@@ -427,6 +433,14 @@ means for you:
 * **Trunk configuration is a template.** Provider-side settings change; the
   checklist in `sip/providers/*.conf` and `voice/trunk.conf.example` is where to
   start, not a guarantee.
+* **No browser has ever opened the remote client**, and the Android app has never
+  been compiled - there is no Android SDK, no device and no browser in this
+  environment. What *is* tested is the server side of that protocol, including a
+  complete conversation driven over a real socket: a wrong frame size, a missing
+  `hello`, or a token check that leaks would fail those tests. The client-side
+  audio code (AudioWorklet capture, playback scheduling) is the part to expect to
+  adjust first; `phone voice web` prints the URL and the token, and the page
+  reports what it is doing in its own log.
 
 Everything that *can* be tested is: `./tests/run.sh` runs the whole thing with
 no root, no network, and no models installed.

@@ -103,6 +103,35 @@ speak_refusal = true
 [logging]
 # One JSONL file per call: every turn with a timestamp, plus the timings.
 transcripts = ~/voice/transcripts
+# Optional note the agent reads at the start of every call. A remote client (the
+# browser page, the Android app, `phone voice note`) writes it, which is how you
+# brief the agent when you are not at the machine: "I am driving, keep it short."
+notes =
+
+[web]
+# The remote client: talk to the agent from anywhere over a data connection.
+# This is the free path - no DID, no per-minute charge - and it is the one a
+# companion app or a browser tab uses. It is NOT the phone number path; see
+# docs/REMOTE.md for why no app can put your carrier number on the agent.
+#
+#   phone voice web                    # loopback only, prints a tokenised URL
+#   phone voice web --host 0.0.0.0 --allow-remote --cert ... --key ...
+#
+# It carries live audio and a dialling API, so it is refuse-by-default: a
+# non-loopback bind needs allow_remote = true AND a token. Put it behind
+# WireGuard or Tailscale rather than a port-forward.
+host = 127.0.0.1
+port = 8443
+# Generated for a run if empty; set it to keep clients logged in across restarts.
+token =
+title = phone voice
+# TLS. A browser refuses microphone access without it (except on localhost); a
+# native app inside a VPN does not need it. `phone sip init` writes a client
+# certificate into ~/.config/phone/tls/ that can be reused here.
+cert =
+key =
+allow_remote = false
+max_calls = 2
 
 [asterisk]
 # Where `phone voice provision` writes, and where `doctor` looks.

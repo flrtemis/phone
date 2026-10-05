@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  phone voice - a client for your own agent.
+
+  Permissions, and why each one is here:
+
+    INTERNET          connect to your server. The app has no other network use:
+                      no analytics, no crash reporting, no update checks.
+    RECORD_AUDIO      the point of the app. Only while a call is active.
+    MODIFY_AUDIO_SETTINGS  to route audio to the earpiece and back.
+    FOREGROUND_SERVICE + FOREGROUND_SERVICE_MICROPHONE
+                      so a call survives the screen turning off.
+    POST_NOTIFICATIONS (Android 13+)  the foreground service notification, which
+                      is what tells you the microphone is live. Non-negotiable.
+    ACCESS_NETWORK_STATE   to say "no network" instead of "connection failed".
+
+  Deliberately absent: READ_PHONE_STATE, READ_CALL_LOG, READ_CONTACTS,
+  READ_SMS, ACCESS_FINE_LOCATION. This app needs none of them, and a client for
+  a privacy-first stack should not be able to see your call log.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- To hand a "call the agent on a real number" action to the dialer. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PhoneVoice">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Lets the server's URL (with its token in the fragment) be opened
+                 from a terminal, an email, or a QR code. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="phonevoice" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+    </application>
+</manifest>

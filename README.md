@@ -143,6 +143,16 @@ sudo systemctl restart asterisk
 Extension 601 on the same dialplan is a plain echo test: if 601 sounds bad, the
 problem is audio, not the model. Extension 600 is the agent.
 
+**When you are not at home**, the same agent is reachable over a data connection
+with no phone company involved — `phone voice web` serves a self-contained page
+(and an API an app can drive), and `android/` has a companion app for it. That
+path is free and works from anywhere you have a network. What it cannot do is
+make the agent answer *your carrier number*: inbound calls to a mobile number are
+delivered by the carrier's IMS to the SIM that owns them, and no application can
+insert itself into that. Your number means a rented DID bridged into this same
+Asterisk — a few dollars a month. Both paths, with the costs and the reasons, are
+in [`docs/REMOTE.md`](docs/REMOTE.md).
+
 Latency is measured per stage, not assumed — `./bin/phone voice simulate --in
 yours.wav` runs your own recording through the real whisper/Ollama/Piper stack
 and prints where the milliseconds went. What is free (the entire model half) and
@@ -301,6 +311,8 @@ phone voice demo | simulate | ask         # offline pipeline, real stack, one pr
 phone voice modelfile [--base M]          # phone-tuned Ollama model (sets num_ctx)
 phone voice provision [--dir D]           # Asterisk pjsip/extensions/rtp + trunk stub
 phone voice serve [--once]                # answer calls (Asterisk connects here)
+phone voice web [--allow-remote --cert F] # call the agent from anywhere, over data
+phone voice note "text" | --show | --clear  # brief the agent for the next call
 phone voice call --to owner [--dry-run]   # ring the owner with the agent on the line
 phone voice dial-test                     # 911/non-owner numbers must be refused
 phone voice transcript [--list] [--tail N]
@@ -336,7 +348,7 @@ threat model, including the honest gaps, is in `docs/HARDENING.md`.
 PHONE_PYTHON=/usr/bin/python3 ./tests/run.sh
 ```
 
-Eight suites, 386 assertions, none of which need root, a provider, network
+Nine suites, 435 assertions, none of which need root, a provider, network
 access, a GPU, or an installed model:
 
 | Suite | Covers |
@@ -352,6 +364,7 @@ access, a GPU, or an installed model:
 | `tests/test_voice_protocol.py` | AudioSocket framing byte by byte, a real socket with a fake Asterisk, call limits, hangup handling, a crashing handler not killing the server |
 | `tests/test_voice_pipeline.py` | turn-taking, barge-in keeping the interrupting audio, real-time pacing, hangup detection, transcript, dial safety (including prompt injection), the Ollama client against a fake HTTP server |
 | `tests/test_voice_cli.py` | config loading and refusals, the Asterisk generator (SRTP not optimistic, no `0.0.0.0/0` identify, the owner number literal and no PSTN wildcard), every `voice` subcommand, and a one-call `serve` against a fake Asterisk |
+| `tests/test_voice_web.py` | the hand-rolled WebSocket (the RFC's own accept-key vector, masking, fragmentation, ping/pong, size caps), a whole conversation over a real socket with the transcript on disk, the remote API's refusals (token, size, 911, non-owner numbers), and a hangup that does not lose the caller's last sentence |
 
 ## Layout
 
@@ -373,8 +386,10 @@ sms/sms.conf.example   documented configuration
 firewall/lockdown.sh   default-deny ruleset, nftables or iptables
 systemd/               sandboxed units for the receiver and the poller
 install/build-pjsip.sh pjproject build that verifies TLS+SRTP afterwards
-voice/                 the local agent: AudioSocket, pipeline, Asterisk generator
-docs/                  FORMAT.md, HARDENING.md, PROVIDERS.md, VOICE.md
+voice/                 the local agent: AudioSocket, pipeline, Asterisk generator,
+                       and the WebSocket remote client (web.py, websocket.py)
+android/               companion app for the remote client (Kotlin, Compose)
+docs/                  FORMAT.md, HARDENING.md, PROVIDERS.md, VOICE.md, REMOTE.md
 tests/                 four suites + tests/run.sh
 ```
 
@@ -413,6 +428,17 @@ allows exactly the configured destination. 911, 988, 999, 112, 000, 111, 110,
 comparison, the config loader refuses to accept one as the owner, and the
 generated dialplan contains the owner's number literally with no pattern that
 reaches the PSTN. `phone voice dial-test` proves it in a second.
+
+Remote access: `phone voice web` serves a self-contained browser client (a real
+WebSocket audio bridge, the same call session the phone line uses) plus a small
+JSON API for a companion app: ring my phone, leave a note, ask a question, read
+the last transcript. The WebSocket layer is implemented from RFC 6455 in the
+standard library, and the suite covers the RFC's own accept-key vector, masking,
+fragmentation, ping/pong, size caps, a whole conversation over a socket, the
+token checks, and `/api/call-me` refusing 911 and every number that is not the
+configured owner. The Android client under `android/` is **not built or run
+here** - no Android SDK in this environment - and no browser has opened the page;
+those are the two things to expect a first-build adjustment on.
 
 Firewall: implemented and tested in `--dry-run`, rule by rule, including the
 property that no rule reaches an unpinned destination. This environment has no
