@@ -314,6 +314,136 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test(args: argparse.Namespace) -> int:
+    """Prove the local text pipeline works, then print what to give your provider.
+
+    This deliberately starts its own daemon on an ephemeral loopback port,
+    posts a synthetic webhook, and reads the file back through the same code
+    path the CLI uses. If this passes, the only thing standing between you and
+    real texts is the provider's webhook -- which is exactly the part this
+    machine cannot do for you.
+    """
+    import json as _json
+    import threading
+    import urllib.error
+    import urllib.request
+
+    cfg = Config.load(args.config)
+    if args.spool_dir:
+        cfg.spool_dir = args.spool_dir
+        cfg.validate()
+
+    spool = Spool(
+        cfg.spool_path,
+        max_files=cfg.max_files,
+        max_bytes=cfg.max_bytes,
+        fsync=cfg.fsync,
+        journal=cfg.journal,
+    ).ensure()
+
+    print(f"spool directory : {spool.dir}")
+    print(f"existing files  : {len(spool.paths())}")
+
+    from sms.daemon import make_server  # local import keeps startup lean
+
+    probe = Config()
+    probe.spool_dir = cfg.spool_dir
+    probe.host = "127.0.0.1"
+    probe.port = 0  # ephemeral
+    probe.token = cfg.token
+    probe.path = cfg.path
+    probe.max_body_bytes = cfg.max_body_bytes
+    probe.journal = cfg.journal
+    probe.fsync = cfg.fsync
+    probe.validate()
+
+    server = make_server(probe)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+
+    before = {p.name for p in spool.paths()}
+    marker = f"phone-sms self-test {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    payload = _json.dumps({"from": "+15550100000", "text": marker, "message_id": f"selftest-{port}"}).encode()
+
+    status = 0
+    body = ""
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{probe.path}",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+            status = response.status
+            body = response.read().decode()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = exc.read().decode(errors="replace")
+    except OSError as exc:
+        print(f"  FAIL  could not deliver the test webhook: {exc}")
+        server.shutdown()
+        server.server_close()
+        return 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    ok = True
+
+    def step(label: str, passed: bool, detail: str = "") -> None:
+        nonlocal ok
+        mark = "ok  " if passed else "FAIL"
+        print(f"  {mark}  {label}" + (f"  ({detail})" if detail else ""))
+        ok = ok and passed
+
+    step("webhook accepted", status in (200, 201), f"HTTP {status}")
+
+    new_files = [p for p in spool.paths() if p.name not in before]
+    step("exactly one new file written", len(new_files) == 1, f"{len(new_files)} new")
+    if not new_files:
+        print("        daemon response:", body[:200])
+        return 1
+
+    path = new_files[0]
+    message = Message.load(path)
+    step("body survived intact", message.body == marker)
+    step("sender recorded", message.sender == "+15550100000", message.sender)
+    step("digest verifies (file not edited)", message.verify(path.read_text()))
+    step("file permissions are 0600", oct(path.stat().st_mode & 0o777) == "0o600",
+         oct(path.stat().st_mode & 0o777))
+    step("body is NOT in the journal", "phone-sms self-test" not in (
+        spool.journal_path.read_text() if spool.journal_path.is_file() else ""
+    ))
+
+    # Leave the machine as we found it: the self-test is not a message.
+    path.unlink(missing_ok=True)
+    print(f"  ok    test message removed ({path.name})")
+
+    if not ok:
+        print("\nself-test FAILED: the local pipeline is broken; fix this before "
+              "pointing a provider at it")
+        return 1
+
+    scheme = "https" if cfg.tls_cert else "http"
+    print("\nlocal pipeline works. now point your provider at it:")
+    print(f"  gateway webhook URL : {scheme}://<this-host>{':' + str(cfg.port) if not cfg.is_loopback else ':' + str(cfg.port)}{cfg.path}")
+    if cfg.is_loopback:
+        print("  note: the receiver is bound to loopback, which a hosted gateway cannot reach.")
+        print("        bring it in over a tunnel instead (docs/PROVIDERS.md):")
+        print("          ssh -N -R 8080:127.0.0.1:8080 gateway-host")
+        print("        or run it on the tunnel address with token + TLS:")
+        print("          phone smsd --host 10.8.0.2")
+    if cfg.token:
+        print("  shared secret       : <set>; send it as 'X-Phone-Token: <token>' or 'Authorization: Bearer <token>'")
+    else:
+        print("  shared secret       : NONE - set [auth] token before exposing this to anything")
+    print("  verify after a real text arrives: phone sms tail --follow")
+    return 0
+
+
 # ----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -323,28 +453,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="path to sms.conf")
     parser.add_argument("--spool-dir", help="override spool directory")
     parser.add_argument("--version", action="version", version=f"phone-sms {__version__}")
+
+    # The same two flags are accepted *after* the subcommand, because
+    # `phone sms test --spool-dir /tmp/x` is what people type. SUPPRESS keeps
+    # the subparser copy from overwriting a value given before the subcommand.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument("--spool-dir", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("list", help="list messages, oldest first")
+    p = sub.add_parser("list", parents=[common], help="list messages, oldest first")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--since", help="ISO date/time lower bound")
     p.add_argument("--from", dest="sender", help="substring match on sender")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("read", help="print one message (id, filename prefix, or 'latest')")
+    p = sub.add_parser("read", parents=[common], help="print one message (id, filename prefix, or 'latest')")
     p.add_argument("needle")
     p.add_argument("--raw", action="store_true", help="dump the file verbatim")
     p.set_defaults(func=cmd_read)
 
-    p = sub.add_parser("tail", help="show recent messages and optionally follow")
+    p = sub.add_parser("tail", parents=[common], help="show recent messages and optionally follow")
     p.add_argument("--last", type=int, default=10, help="how many existing messages to print first (0 = none)")
     p.add_argument("--follow", "-f", action="store_true", help="keep watching for new messages")
     p.add_argument("--interval", type=float, default=1.0)
     p.add_argument("--from-start", action="store_true", help="print the entire spool before following")
     p.set_defaults(func=cmd_tail)
 
-    p = sub.add_parser("grep", help="regex search across messages")
+    p = sub.add_parser("grep", parents=[common], help="regex search across messages")
     p.add_argument("pattern")
     p.add_argument("--ignore-case", "-i", action="store_true")
     p.add_argument("--field", choices=["all", "from", "body"], default="all")
@@ -352,28 +490,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("stats", help="counts and date range")
+    p = sub.add_parser("stats", parents=[common], help="counts and date range")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_stats)
 
-    p = sub.add_parser("verify", help="re-hash every message against its stored digest")
+    p = sub.add_parser("verify", parents=[common], help="re-hash every message against its stored digest")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_verify)
 
-    p = sub.add_parser("export", help="dump the spool as jsonl/txt/raw")
+    p = sub.add_parser("export", parents=[common], help="dump the spool as jsonl/txt/raw")
     p.add_argument("--format", choices=["jsonl", "txt", "raw"], default="jsonl")
     p.add_argument("--since")
     p.add_argument("--from", dest="sender")
     p.add_argument("--out", help="write to a file instead of stdout")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("purge", help="delete messages older than N days")
+    p = sub.add_parser("purge", parents=[common], help="delete messages older than N days")
     p.add_argument("--older-than", type=float, default=30.0)
     p.add_argument("--yes", action="store_true")
     p.set_defaults(func=cmd_purge)
 
-    p = sub.add_parser("config", help="print effective configuration")
+    p = sub.add_parser("config", parents=[common], help="print effective configuration")
     p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("test", parents=[common], help="self-test the whole local pipeline and print your webhook URL")
+    p.set_defaults(func=cmd_test)
     return parser
 
 
@@ -383,6 +524,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return int(args.func(args) or 0)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
+    except SpoolError as exc:
+        print(f"spool error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # A bad spool path (a typo, a file where a directory should be, a
+        # read-only filesystem) deserves a sentence, not a traceback.
+        print(f"cannot use the spool: {exc}", file=sys.stderr)
         return 2
     except BrokenPipeError:  # `phone sms list | head`
         # Closing the stream here is courtesy: the reader is gone, and the

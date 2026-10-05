@@ -282,6 +282,65 @@ def test_tail_follow_ignores_unparseable_files(workspace, capsys, monkeypatch) -
     assert "real one" in capsys.readouterr().out
 
 
+# ---- test (self-test of the whole local pipeline) -----------------------
+def test_self_test_passes_on_a_healthy_install(workspace, capsys) -> None:
+    _spool, base, _ = workspace
+    assert run(base + ["test"]) == 0
+    out = capsys.readouterr().out
+    assert "webhook accepted" in out
+    assert "body survived intact" in out
+    assert "local pipeline works" in out
+
+
+def test_self_test_leaves_no_message_behind(workspace) -> None:
+    spool, base, _ = workspace
+    before = {p.name for p in spool.paths()}
+    run(base + ["test"])
+    assert {p.name for p in spool.paths()} == before
+
+
+def test_self_test_prints_the_webhook_url_and_warns_about_loopback(workspace, capsys) -> None:
+    _spool, base, _ = workspace
+    run(base + ["test"])
+    out = capsys.readouterr().out
+    assert "/sms/incoming" in out
+    assert "loopback" in out          # the provider cannot reach 127.0.0.1
+    assert "ssh -N -R" in out         # ...so it points at the tunnel recipe
+
+
+def test_self_test_warns_when_no_token_is_configured(workspace, capsys) -> None:
+    _spool, base, _ = workspace
+    run(base + ["test"])
+    assert "shared secret       : NONE" in capsys.readouterr().out
+
+
+def test_self_test_works_on_an_empty_spool(workspace, tmp_path, capsys) -> None:
+    conf = tmp_path / "fresh.conf"
+    conf.write_text(f"[spool]\ndir = {tmp_path / 'brand-new'}\n")
+    assert run(["--config", str(conf), "test"]) == 0
+    out = capsys.readouterr().out
+    assert "existing files  : 0" in out
+
+
+def test_self_test_reports_a_broken_spool_clearly(workspace, tmp_path, capsys) -> None:
+    """A spool path that cannot be used must produce a sentence, not a traceback.
+
+    Note: an unwritable *directory* is deliberately repaired by ensure() (it
+    re-chmods to 0700), so the honest way to break this is to point the spool
+    at something that is not a directory at all.
+    """
+    conf = tmp_path / "broken.conf"
+    not_a_dir = tmp_path / "i-am-a-file"
+    not_a_dir.write_text("this is not a spool directory\n")
+    conf.write_text(f"[spool]\ndir = {not_a_dir}\n")
+
+    assert run(["--config", str(conf), "test"]) == 2
+    captured = capsys.readouterr()
+    assert "cannot use the spool" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
 # ---- config ------------------------------------------------------------
 def test_config_prints_effective_settings(workspace, capsys) -> None:
     _spool, base, _ = workspace

@@ -539,6 +539,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.check_config:
         print(cfg.render())
+        if cfg.port == 0:
+            print(
+                "warning: port 0 asks the kernel for an arbitrary free port. That is fine for a\n"
+                "         self-test, but a provider webhook needs a fixed port: set [daemon] port."
+            )
         print("configuration OK")
         return 0
 

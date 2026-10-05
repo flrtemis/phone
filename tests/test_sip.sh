@@ -60,20 +60,30 @@ CONF="$REPO_DIR/sip/pjsua.conf.example"
 
 # Every option pjsua actually has, from the pjsua CLI reference. Anything in
 # the template that is not on this list is a typo that would abort start-up.
-KNOWN_OPTIONS="config-file log-level app-log-level log-file color no-color \
+# Exact option names from long_options[] in
+# pjsip-apps/src/pjsua/pjsua_app_config.c. Anything not in this list aborts
+# pjsua at start-up, so the template must not contain it.
+KNOWN_OPTIONS="config-file log-file log-level app-log-level log-append color no-color \
+light-bg no-stderr help version clock-rate snd-clock-rate stereo null-audio local-port \
+ip-addr bound-addr no-tcp no-udp norefersub no-supported-norefersub keep-call-on-tsx-fail \
+proxy outbound registrar reg-timeout publish mwi use-100rel use-ims id contact \
+contact-params contact-uri-params reg-contact-params reg-contact-uri-params auto-update-nat \
+disable-stun use-compact-form accept-redirect no-force-lr realm username password aka-op \
+aka-amf rereg-delay reg-use-proxy nameserver server-failover stun-srv upnp add-buddy \
+offer-x-ms-msg no-presence auto-answer auto-play auto-play-hangup auto-rec auto-loop \
+auto-conf play-file play-tone rec-file rtp-port use-ice ice-regular ice-trickle \
+ice-max-hosts ice-no-rtcp use-turn turn-srv turn-tcp turn-tls turn-tls-ca-file \
+turn-tls-cert-file turn-tls-privkey-file turn-tls-privkey-pwd turn-tls-neg-timeout \
+turn-tls-cipher turn-tls-verify-server turn-user turn-passwd rtcp-mux rtcp-xr use-srtp \
+srtp-secure srtp-keying add-codec dis-codec complexity quality ptime no-vad ec-tail ec-opt \
+ilbc-mode rx-drop-pct tx-drop-pct next-account next-cred max-calls duration thread-cnt \
 use-tls tls-ca-file tls-cert-file tls-privkey-file tls-password tls-verify-server \
-tls-verify-client tls-neg-timeout tls-srv-name \
-use-srtp srtp-secure srtp-keying \
-registrar id contact contact-params proxy reg-timeout realm username password \
-next-cred publish use-100rel auto-update-nat next-account \
-local-port ip-addr bound-addr no-tcp no-udp nameserver outbound stun-srv set-qos ipv6 \
-use-ice ice-no-host ice-no-rtcp rtp-port rx-drop-pct tx-drop-pct use-turn turn-srv \
-turn-tcp turn-user turn-passwd \
-add-codec dis-codec clock-rate snd-clock-rate stereo null-audio play-file play-tone \
-auto-play auto-loop auto-conf rec-file auto-rec quality ptime no-vad ec-tail ec-opt \
-ilbc-mode capture-dev playback-dev capture-lat playback-lat snd-auto-close no-tones jb-max-size \
-add-buddy auto-answer max-calls thread-cnt duration norefersub use-compact-form force-lr \
-accept-redirect mwi max-calls no-force-lr"
+tls-verify-client tls-neg-timeout tls-cipher capture-dev playback-dev capture-lat \
+playback-lat stdout-refresh stdout-refresh-text stdout-no-buf snd-auto-close no-tones \
+jb-max-size ipv6 set-qos no-mci use-timer timer-se timer-min-se outb-rid video text \
+text-red extra-audio vcapture-dev vrender-dev play-avi auto-play-avi rec-avi rec-avi-size \
+rec-avi-audio auto-rec-avi use-cli cli-telnet-port no-cli-console server-affinity custom-sdp"
+
 
 unknown=""
 while IFS= read -r line; do
@@ -125,12 +135,14 @@ check "--init sets mode 600 on a file holding the SIP password" '[ "$(stat -c %a
 check "--init expands @HOME@ to the real home" '! grep -q "@HOME@" "$CONF_PATH" && grep -q "$HOME/.config/phone/tls" "$CONF_PATH"'
 check "--init generated a client certificate" '[ -f "$HOME/.config/phone/tls/client.pem" ] && [ "$(stat -c %a "$HOME/.config/phone/tls/client.key")" = "600" ]'
 
-# Fill in credentials the way a user would.
+# Fill in credentials the way a user would. Order matters: collapse the
+# qualified 'sip.YOUR_PROVIDER.example' first, or the generic rule turns it
+# into 'sip.sip.example.net' and later assertions silently stop matching.
 sed -i \
     -e 's/YOUR_SIP_USERNAME/terminal7/g' \
-    -e 's/YOUR_PROVIDER\.example/sip.example.net/g' \
-    -e 's/sip\.YOUR_PROVIDER\.example/sip.example.net/g' \
     -e 's/YOUR_SIP_PASSWORD/CorrectHorseBatteryStaple/g' \
+    -e 's/sip\.YOUR_PROVIDER\.example/sip.example.net/g' \
+    -e 's/YOUR_PROVIDER\.example/sip.example.net/g' \
     "$CONF_PATH"
 sed -i "s|--tls-ca-file /etc/ssl/certs/ca-certificates.crt|--tls-ca-file $HOME/.config/phone/tls/ca-bundle.pem|" "$CONF_PATH"
 
@@ -138,6 +150,10 @@ check "--check passes on a fully configured, hardened config" './sip/phone.sh --
 check "--print shows the pjsua invocation and config file" './sip/phone.sh --print | grep -q -- --config-file'
 
 # ---- launcher: every refusal ---------------------------------------------
+# A pristine copy of the configured tree, so the parser section below can
+# mutate and restore deterministically.
+rm -rf "$TMP/pristine"; cp -a "$HOME/.config/phone" "$TMP/pristine"
+
 refuse() { # name, expected-substring, mutation-command
     # Snapshot the whole config tree, not just sip.conf: a mutation that
     # loosens a key's permissions must not leak into the next case, or the
@@ -199,6 +215,117 @@ if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "4000-4010"; then
 else
     bad "warns when --rtp-port disagrees with the firewall window" "$(printf '%s' "$out" | grep -i rtp | head -1)"
 fi
+
+printf 'parser compatibility (read_config_file() in pjsua_app_config.c)\n'
+# It splits on whitespace, ends the line at '#', and does NO backslash
+# unescaping. Escaping the semicolon in a URI therefore leaks a literal
+# backslash into the URI and the transport parameter is misparsed.
+check "no backslash-escaped semicolons in URIs" \
+    '! grep -vE "^#" "$CONF" | grep -qE "\\\\;"' \
+    "pjsua does not unescape backslashes: write a literal ;"
+check "registrar URI carries the TLS transport parameter" \
+    'grep -E "^--registrar" "$CONF" | grep -q ";transport=tls"'
+check "contact URI carries the TLS transport parameter" \
+    'grep -E "^--contact" "$CONF" | grep -q ";transport=tls"'
+check "every config line fits pjsua's 200-byte read buffer" \
+    '[ "$(awk "length(\$0) > 199" "$CONF" | wc -l)" -eq 0 ]'
+check "no accidentally unquoted '#' inside a value" \
+    '! grep -vE "^#" "$CONF" | grep -qE "^--[a-z-]+ +[^\"#]*#"'
+
+# The launcher must catch each of those before pjsua does.
+rm -rf "$HOME/.config/phone"; cp -a "$TMP/pristine" "$HOME/.config/phone"
+check "launcher accepts the corrected template" './sip/phone.sh --check'
+
+cp -a "$HOME/.config/phone" "$TMP/keep"
+python3 - "$CONF_PATH" <<'PYEOF'
+import pathlib, re, sys
+# Escape the first semicolon of the registrar URI: exactly the mistake
+# a user makes when told (wrongly) that ';' must be escaped in a pjsua
+# config file. pjsua does no backslash unescaping, so the URI breaks.
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+new, count = re.subn(r"^(--registrar .*?);", r"\1\\;", text, count=1, flags=re.M)
+assert count == 1, "fixture drifted: no --registrar line to mutate"
+path.write_text(new)
+PYEOF
+out="$(./sip/phone.sh --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "unescape"; then
+    ok "refuses an escaped semicolon in a URI"
+else
+    bad "refuses an escaped semicolon in a URI" "$(printf '%s' "$out" | head -1)"
+fi
+rm -rf "$HOME/.config/phone"; cp -a "$TMP/keep" "$HOME/.config/phone"
+
+sed -i 's|^--password .*|--password pass#word|' "$CONF_PATH"
+out="$(./sip/phone.sh --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "comment"; then
+    ok "refuses an unquoted '#' in the password (would be truncated)"
+else
+    bad "refuses an unquoted '#' in the password" "$(printf '%s' "$out" | head -1)"
+fi
+rm -rf "$HOME/.config/phone"; cp -a "$TMP/keep" "$HOME/.config/phone"
+
+sed -i 's|^--password .*|--password "pass#word"|' "$CONF_PATH"
+check "accepts a quoted '#' in the password" './sip/phone.sh --check'
+rm -rf "$HOME/.config/phone"; cp -a "$TMP/keep" "$HOME/.config/phone"
+
+python3 - "$CONF_PATH" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+p.write_text(text.replace("--reg-timeout 300", "--reg-timeout 300 # " + "x" * 200))
+PYEOF
+out="$(./sip/phone.sh --check 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "200-byte"; then
+    ok "refuses a line that would be truncated by the 200-byte buffer"
+else
+    bad "refuses a line longer than pjsua's read buffer" "$(printf '%s' "$out" | head -1)"
+fi
+rm -rf "$HOME/.config/phone"; cp -a "$TMP/keep" "$HOME/.config/phone"
+
+printf '\nprovisioning\n'
+check "the provider directory lists known providers" './sip/provision.sh --list-providers | grep -q telnyx'
+check "provisioning writes a config the launcher accepts" \
+    'PHONE_SIP_CONF="$TMP/prov.conf" ./sip/provision.sh --provider telnyx --username 1234567 --password-environment-does-not-exist 2>/dev/null; true'
+out="$(printf 'secret\n' | PHONE_SIP_CONF="$TMP/prov.conf" ./sip/provision.sh --provider telnyx --username 1234567 --password-stdin --force 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(stat -c %a "$TMP/prov.conf")" = "600" ]; then
+    ok "provision fills in a provider block (mode 600)"
+else
+    bad "provision fills in a provider block" "$(printf '%s' "$out" | tail -2)"
+fi
+check "provisioned config carries the TLS transport parameter" 'grep -q ";transport=tls" "$TMP/prov.conf"'
+check "provisioned config has no placeholders left" \
+    '! grep -qE "@HOME@|YOUR_SIP_|YOUR_PROVIDER" "$TMP/prov.conf"'
+check "provisioned TLS paths are absolute and expanded" \
+    '! grep -q "@HOME@" "$TMP/prov.conf" && grep -q "^--tls-cert-file /" "$TMP/prov.conf"'
+check "provisioned config passes the launcher's own checks" \
+    'PHONE_SIP_CONF="$TMP/prov.conf" ./sip/phone.sh --check'
+check "provision redacts the password in its output" \
+    '! printf "%s" "$out" | grep -q "secret"'
+check "provision quotes a password containing '#'" \
+    'printf "pa#ss\n" | PHONE_SIP_CONF="$TMP/prov2.conf" ./sip/provision.sh --provider telnyx --username u --password-stdin --force >/dev/null 2>&1; grep -q "^--password \"pa#ss\"" "$TMP/prov2.conf"'
+
+printf '\ndoctor\n'
+doctor_out="$(./sip/phone.sh doctor 2>&1)"; doctor_rc=$?
+if [ "$doctor_rc" -eq 0 ] && printf '%s' "$doctor_out" | grep -qi "audio devices"; then
+    ok "doctor runs the checks and reports the audio section"
+else
+    bad "doctor runs the checks and reports the audio section" \
+        "rc=$doctor_rc | $(printf '%s' "$doctor_out" | grep -E '^(error|  !!)' | head -2 | tr '\n' ' ')"
+fi
+if printf '%s' "$doctor_out" | grep -qiE "no /dev/snd|/dev/snd exists"; then
+    ok "doctor reports the audio hardware state honestly"
+else
+    bad "doctor reports the audio hardware state honestly" "$(printf '%s' "$doctor_out" | tail -2 | tr '\n' ' ')"
+fi
+check "doctor exits 0 even on a machine with no sound hardware" '[ "$doctor_rc" -eq 0 ]'
+check "doctor explains how to select the microphone and speakers" \
+    'printf "%s" "$doctor_out" | grep -q -- "--capture-dev"'
+check "doctor tells you how to probe pjsua's own device indexes" \
+    'printf "%s" "$doctor_out" | grep -q -- "--audio"'
+check "doctor never places a call or registers" \
+    'printf "%s" "$doctor_out" | grep -qivE "^\\[.*Registration|starting pjsua"'
+
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

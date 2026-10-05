@@ -102,6 +102,16 @@ party you trust with metadata.
 Interoperating with the telephone network means disclosing the calling and
 called numbers to carriers by design. No local configuration changes that.
 
+### Your network can defeat TLS, and the tools will tell you
+
+If your ISP, employer, or container platform intercepts TLS, pjsua may either
+fail to register or (worse) verify against a corporate CA that was injected into
+your trust store. `sip/test-tls.sh` reports the subject, issuer-signed chain and
+SANs it actually saw, and calls out "no peer certificate available" as a
+middlebox signature. Run it before trusting a registration failure to be the
+provider's fault — and never "fix" it by removing `--tls-verify-server`, which
+the launcher will not let you do anyway.
+
 ### No protection against a compromised host
 
 If something is already running as your user (or as root), it can read the

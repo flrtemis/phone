@@ -97,7 +97,11 @@ class Config:
 
     def validate(self) -> None:
         """Refuse configurations that would quietly expose the spool."""
-        if not (0 < self.port < 65536):
+        # Port 0 means "any free port" to the kernel. That is legitimate for a
+        # self-test or an ephemeral run, and useless for a webhook receiver a
+        # provider has to reach, so it is allowed here and flagged loudly by
+        # --check-config.
+        if not (0 <= self.port < 65536):
             raise ConfigError(f"port out of range: {self.port}")
         if not self.path.startswith("/"):
             raise ConfigError(f"path must start with '/': {self.path}")

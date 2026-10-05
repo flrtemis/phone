@@ -83,16 +83,49 @@
 # your provider -- must be edited before first use
 # ---------------------------------------------------------------------------
 # Every URI that should go over TLS must say so: `;transport=tls`. Without it
-# pjsua resolves the URI for UDP, finds no UDP transport, and fails.
+# pjsua resolves the URI for UDP, finds no UDP transport (you disabled it), and
+# registration fails.
 #
-# Replace the three placeholders below, or put your credentials in
-# ~/.config/phone/sip.secrets and source them (see docs/PROVIDERS.md).
---registrar sip:sip.YOUR_PROVIDER.example:5061\;transport=tls
+# Write the semicolon literally. Do NOT escape it as `\;`: pjsua's config
+# reader (read_config_file() in pjsua_app_config.c) splits on whitespace and
+# understands exactly one special character - `#`, which ends the line. It
+# performs no backslash unescaping, so an escaped semicolon survives into the
+# URI as a literal backslash and the transport parameter is misparsed.
+#
+# Two other parser facts worth knowing:
+#   * `#` ANYWHERE in a value ends the line, so a password containing `#`
+#     would be silently truncated. Wrap such a value in double quotes
+#     ("p#ssword"); the parser honours quotes. `phone sip --check` refuses an
+#     unquoted `#` in the password for this reason.
+#   * Each config line is read into a 200-byte buffer, so keep lines short.
+#
+# Fill these in by hand, or let `phone sip provision --provider telnyx` do it
+# (see sip/providers/ for ready-made account blocks).
+--registrar sip:sip.YOUR_PROVIDER.example:5061;transport=tls
 --id sip:YOUR_SIP_USERNAME@sip.YOUR_PROVIDER.example
 --realm YOUR_PROVIDER.example
 --username YOUR_SIP_USERNAME
 --password YOUR_SIP_PASSWORD
---contact sip:YOUR_SIP_USERNAME@sip.YOUR_PROVIDER.example:5061\;transport=tls
+--contact sip:YOUR_SIP_USERNAME@sip.YOUR_PROVIDER.example:5061;transport=tls
+
+# ---------------------------------------------------------------------------
+# audio: make pjsua use your actual microphone and speakers
+# ---------------------------------------------------------------------------
+# pjsua opens ALSA directly (no PulseAudio/PipeWire indirection) and refers to
+# devices by the index it enumerates them under. `phone sip doctor --audio`
+# lists the ALSA hardware and, with --probe, prints pjsua's own enumeration.
+# Point pjsua at what `doctor --audio` reported:
+#
+#--capture-dev 0
+#--playback-dev 0
+#
+# Do not confuse these with ALSA's card/device numbers: card 1, device 0 may
+# be index 3 to pjsua. Always read the index from pjsua's own list.
+#
+# `--snd-auto-close -1` keeps the device open between calls (faster pickup) --
+# the default is -1, i.e. disabled. Latency knobs if you are on a USB headset:
+#--capture-lat 120
+#--playback-lat 120
 
 # Keep the registration refresh polite; 300s is well inside most providers'
 # expiry windows and cuts keepalive chatter by ~5x on the default 55s.

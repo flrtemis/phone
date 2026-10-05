@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 # phone -- one command line for voice, text, and the firewall around them.
 #
-#   phone sip [--init|--check|--print] [call args]   encrypted voice (pjsua)
+#   phone sip init                     render the config, make a client cert
+#   phone sip provision --provider X   fill in your provider's account block
+#   phone sip check                    verify hardening (refuses if degraded)
+#   phone sip doctor [--audio]         checks + microphone/speaker discovery
+#   phone sip test-tls                 prove TLS reaches the provider
+#   phone sip                          register; `phone sip -- URI` to call
+#
+#   phone sms test                     self-test the text pipeline end to end
 #   phone sms <list|read|tail|grep|stats|verify|export|purge|config>
-#   phone smsd [args]                                run the webhook receiver
-#   phone sms-poll [args]                            run the puller
-#   phone firewall [args]                            lockdown / unblock / status
-#   phone doctor                                     preflight checks
-#   phone status                                     what is running right now
+#   phone smsd [args]                  run the webhook receiver
+#   phone sms-poll [args]              run the puller
+#
+#   phone firewall [args]              lockdown / unblock / status / rollback
+#   phone doctor                       preflight checks for the whole system
+#   phone status                       what is running right now
 #   phone version
 #
-# No daemon required for reading. Nothing here talks to the network unless you
-# start something that does.
+# No daemon is required for reading, and nothing here talks to the network
+# unless you start something that does.
 
 set -euo pipefail
 

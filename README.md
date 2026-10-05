@@ -95,12 +95,63 @@ Full grammar, filename policy, and guarantees: `docs/FORMAT.md`.
 
 ```bash
 sudo install/build-pjsip.sh     # builds pjproject with TLS + SRTP, then verifies it
-./bin/phone sip --init          # renders the config, generates a client certificate
-$EDITOR ~/.config/phone/sip.conf   # registrar, username, password
-./bin/phone sip --check         # refuses to start if anything is missing or degraded
-./bin/phone sip                # register and wait for calls
-./bin/phone sip -- 'sip:+15550100...@sip.example.net;transport=tls'
+./bin/phone sip init            # renders the config, generates a client certificate
+./bin/phone sip provision --provider telnyx --username 1234567 --password-stdin
+                                # fills in your account block (see sip/providers/)
+./bin/phone sip check           # refuses to start if anything is missing or degraded
+./bin/phone sip doctor --audio  # which microphone and speakers will pjsua use?
+./bin/phone sip test-tls        # prove TLS reaches the provider before blaming the password
+./bin/phone sip                 # register and wait for calls
+./bin/phone sip -- 'sip:+15550100...@sip.telnyx.com;transport=tls'
 ```
+
+### Wiring the three pieces together
+
+Each leg is now covered by a command that tells you whether it works, so a
+failure points at one leg instead of the whole system.
+
+| Leg | Command | What it proves |
+| --- | --- | --- |
+| Provider trunk | `phone sip provision --provider X --username … --password-stdin` | your account block is written correctly, with the TLS transport parameter and values quoted so pjsua's parser cannot mangle them |
+| | `phone sip test-tls` | DNS, TCP, the TLS handshake, certificate verification, the names on the certificate, and a SIP `OPTIONS` probe — before pjsua is pointed at it. It also tells you when your *network* is intercepting TLS |
+| | `phone sip check` | the config cannot silently downgrade: TLS-only, SRTP mandatory, server verified, secrets 0600, no SIP message logging |
+| Local audio | `phone sip doctor --audio` | whether `/dev/snd` exists, whether you are in group `audio`, the ALSA hardware, and pjsua's own device indexes |
+| | `phone sip -- --capture-dev N --playback-dev N` | pins the microphone and speakers for one run |
+| | `arecord -f dat -d 3 /tmp/mic.wav && aplay /tmp/mic.wav` | the hardware itself, without pjsua in the way |
+| Provider webhook | `phone sms test` | the whole local text path: real HTTP → spool file → read, digest, permissions, plus the exact URL and token to give your provider |
+
+`phone sip doctor` reports the audio situation *before* the config checks run,
+so on a fresh machine it answers the "can this box even hear me?" question
+without needing a working account yet.
+
+### What no script can do for you
+
+Three parts of "a real phone" depend on accounts and machines that are yours,
+not ours. Be clear-eyed about them:
+
+1. **The DID. Buying a number and pointing it at your trunk is an account
+   action.** I cannot create a Telnyx/Flowroute/Twilio account, cannot prove
+   ownership of a number for regulatory (KYC/E911) purposes, and cannot enter
+   payment details. `phone sip provision` does everything after that: it fills
+   in the registrar, account, realm, contact URI and credentials, and tells you
+   the provider-side checklist to tick off (`sip/providers/*.conf`).
+2. **Your LAN and your provider's cloud cannot reach each other from here.**
+   Audio needs SRTP flowing both ways between your host and the provider's
+   media relays, and inbound calls need the provider to be able to reach *you*.
+   That requires a hole in your NAT/router (or a WireGuard tunnel) that only
+   you can open. What I can do is tell you exactly which addresses to pin:
+   `phone sip test-tls --media-host <relay>` resolves them, and
+   `phone firewall --sip-host <registrar> --sip-host <relay>` pins them.
+3. **A hosted gateway cannot POST to `127.0.0.1`.** The receiver is
+   loopback-only by design. Terminate the exposure on your side — an SSH
+   reverse tunnel or a WireGuard peer — or bind the tunnel address with a token
+   *and* TLS (`phone smsd --host 10.8.0.2`). `phone sms test` prints the exact
+   URL, the header format, and the tunnel recipe for your configuration.
+
+Also worth stating plainly: **I cannot hear your audio or see your registration
+result.** Verifying that a call sounds right is something only you can do, on
+your hardware, with your carrier. Everything up to that point is automated and
+tested; the last mile is a human with a phone in hand.
 
 `phone sip --check` is the useful part. It fails, with an explanation, if:
 
@@ -161,9 +212,26 @@ in SIP lockdown guides.
 | Flask `sms_daemon.py` bound to `127.0.0.1:8080` | a framework dependency for what is a 200-line HTTP handler; also no authentication, size limit, or rate limit | stdlib `http.server` with a strict content-type allowlist, token auth (constant-time compare), body cap, per-client rate limiting, replay suppression, and a fail-closed refusal to bind a public interface without token + TLS |
 | `tail -f ~/sms/incoming/*.txt \| grep …` | glob expanded once, so later messages are never read; cross-file output interleaves | `phone sms tail --follow` (and `read`, `grep`, `export`, `verify`) |
 
+### Defects in this project's own first version, found by reading the parser
+
+Every one of these produced a *plausible-looking* config that would have failed
+against a real provider, so each now has a regression test.
+
+| Was | Why it broke | Now |
+| --- | --- | --- |
+| `--registrar sip:host:5061\;transport=tls` | pjsua's `read_config_file()` splits on whitespace and special-cases only `#`. It does **no** backslash unescaping, so the URI reached the SIP parser with a literal backslash and the transport parameter was misparsed | literal `;transport=tls`; the launcher rejects `\;` outright, and `sip/provision.sh` emits it correctly (`tests/test_sip.sh` asserts both) |
+| Nothing checked for `#` in values | `#` ends the line *anywhere*, so a password containing it would be silently truncated and registration would fail with a confusing 401 | unquoted `#` in the password is refused with the explanation; provisioning quotes such values automatically; quoted `#` is accepted |
+| Nothing checked line length | config lines are read into a 200-byte buffer (`char line[200]`), so a long URI is silently truncated | the launcher refuses any line over 199 bytes |
+| `phone sip provision` copied the template verbatim | `@HOME@` stayed unexpanded, so `--tls-cert-file` pointed at a path that cannot exist, and the missing client certificate was never generated | provisioning expands `@HOME@`, prefers your own CA bundle, generates the certificate if absent, and refuses to emit a file containing a placeholder |
+| `phone sip doctor` (bare word, as documented) | the launcher treated the word `doctor` as a *call target* and executed pjsua — a diagnostic command that phones someone | bare `init`/`check`/`doctor`/`print`/`provision`/`test-tls` are recognised; a call target always contains `:` or `@`, so there is no ambiguity |
+| `phone sms test --spool-dir X` | `--config`/`--spool-dir` were only accepted *before* the subcommand | the flags work in either position |
+| `phone sip test-tls` reported "negotiated TLSv1.2" on a failed handshake | openssl prints the protocol it *attempted* even when verification fails, so a broken connection looked half-successful | protocol and cipher are only reported when the handshake truly succeeded |
+| A bad spool path produced a Python traceback | unhandled `OSError` from the CLI | one clear sentence and exit code 2 |
+
 ## Command reference
 
 ```
+phone sms test                            # self-test the pipeline; print your webhook URL
 phone sms list [--limit N] [--since ISO] [--from S] [--json]
 phone sms read {latest|<id>|<filename>} [--raw]
 phone sms tail [--last N] [--follow] [--from-start]
@@ -176,10 +244,15 @@ phone sms config
 phone smsd [--config F] [--host H] [--port N] [--token T] [--check-config]
 phone sms-poll [--once] [--dry-run] [--url U] [--auth bearer:TOKEN]
 
-phone sip [--init|--check|--print] [call...]
+phone sip init                            # config template + client certificate
+phone sip provision --provider telnyx|flowroute|twilio|asterisk \
+                    --username U --password-stdin [--did +1555...] [--domain H]
+phone sip check | doctor [--audio] | test-tls | print
+phone sip                                 # register;  phone sip -- 'sip:num@host;transport=tls'
+                                          # (pjsua options go after --: --capture-dev N)
 phone firewall [--sip-host H] [--sms-host H] [--resolver IP] [--wg-port N]
                [--rtp-range A-B] [--panic-timeout N] [--dry-run|--status|--unblock|--rollback|--confirm]
-phone doctor        # preflight: what is present, what is degraded, what to fix
+phone doctor        # preflight for the whole system: text, voice, firewall
 phone status        # what is running right now
 ```
 
@@ -208,7 +281,7 @@ threat model, including the honest gaps, is in `docs/HARDENING.md`.
 PHONE_PYTHON=/usr/bin/python3 ./tests/run.sh
 ```
 
-Four suites, ~230 assertions, none of which need root, a provider, or network
+Four suites, 265 assertions, none of which need root, a provider, or network
 access:
 
 | Suite | Covers |
@@ -217,7 +290,7 @@ access:
 | `tests/test_daemon.py` | field mapping, every rejection path (400/401/404/405/411/413/415/429/507), replay suppression, config safety |
 | `tests/test_poll.py` | cursor handling, idempotence across restarts, retry-after-failed-write, auth, payload shapes |
 | `tests/test_cli.py` | list/read/tail/grep/stats/verify/export/purge, including follow-mode seeing new files |
-| `tests/test_sip.sh` | config linter against the real pjsua option list, and each launcher refusal |
+| `tests/test_sip.sh` | config linter against pjsua's exact `long_options[]`, the parser-compatibility rules (no `\;`, no bare `#`, 200-byte lines), each launcher refusal, provisioning, and doctor |
 | `tests/test_firewall.sh` | generated policy shape, "no unpinned destination" property, refusals |
 | `tests/test_e2e.sh` | real daemon + real HTTP + real CLI, byte-identical body, UTF-8, auth |
 
@@ -227,6 +300,10 @@ access:
 bin/phone              one command line for everything
 sip/pjsua.conf.example hardened pjsua configuration (placeholders marked)
 sip/phone.sh           launcher: verifies, then execs pjsua; refuses to degrade
+                       also: init, check, doctor --audio, test-tls, provision
+sip/provision.sh       fills in a provider account block (quotes values safely)
+sip/providers/         telnyx, flowroute, twilio, asterisk account blocks
+sip/test-tls.sh        DNS + TCP + TLS + certificate + SIP OPTIONS probe
 sip/gen-certs.sh       client certificate + explicit CA bundle
 sms/spool.py           the file format and atomic writer (the contract)
 sms/config.py          INI + PHONE_SMS_* env + flags, fail-closed validation
@@ -243,12 +320,24 @@ tests/                 four suites + tests/run.sh
 
 ## Status
 
-Text pipeline: implemented and covered by tests end-to-end. Voice: configuration,
-launcher, certificate tooling and build script are implemented and tested against
-a stub `pjsua`; the real binary is not installed in this environment, so live
-registration and audio have not been exercised here. Firewall: implemented and
-tested in `--dry-run` (the generated rulesets are asserted rule by rule); this
-environment has no `nft`, so nothing has been loaded into a live kernel here.
+Text pipeline: implemented, and covered end to end (real daemon, real HTTP,
+real CLI). The webhook leg is the only part that needs a third party, and
+`phone sms test` verifies everything on your side of it.
+
+Voice: the configuration, launcher, certificate tooling, provider provisioning,
+audio discovery and TLS probe are implemented and tested against a stub `pjsua`.
+The real binary is not installed here, and this sandbox has no sound card and
+no route to a SIP provider (its egress proxy terminates TLS, which
+`sip/test-tls.sh` correctly reports as a middlebox). So: **live registration,
+audio through your microphone, and a real two-way call have not been exercised
+in this environment.** The provider templates are built from vendor
+documentation; `sip/providers/twilio.conf` is explicitly marked unverified. Run
+`phone sip doctor --audio` and `phone sip test-tls` on your host first — they
+exist to turn the last mile into a sequence of yes/no answers.
+
+Firewall: implemented and tested in `--dry-run`, rule by rule, including the
+property that no rule reaches an unpinned destination. This environment has no
+`nft`, so nothing has been loaded into a live kernel here.
 
 No RCS, no MMS, no group messaging, no call recording, no voicemail, no GUI. If
 that list is a problem, this is the wrong tool — which is rather the point.
