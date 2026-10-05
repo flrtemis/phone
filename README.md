@@ -4,6 +4,11 @@ A communication terminal for a Linux host, stripped to its functional core:
 
 * **voice** — PJSIP (`pjsua`) speaking SIP over TLS with mandatory SRTP, launched
   by a wrapper that refuses to run in a degraded configuration.
+* **agent** — a local Ollama model that answers the phone: Asterisk bridges the
+  call to `phone voice serve`, which does whisper → Ollama → Piper on your own
+  hardware. It can call your phone back, and it can never dial anyone else. The
+  whole design, with the cost table and the honesty about what is not free, is in
+  [`docs/VOICE.md`](docs/VOICE.md).
 * **text** — a dependency-free Python daemon that receives SMS webhooks (or polls
   a gateway) and writes each message to a plain text file, plus a CLI that reads
   those files.
@@ -24,6 +29,13 @@ no Python packages beyond the standard library.
    +---------------+     |   +-----------------------------+         |
                          |                                           |
    +---------------+     |   +-----------------------------+         |
+   |  your phone   |     |   | phone voice serve           |         |
+   | (SIP app 100, |TLS  |   |  - Asterisk --AudioSocket-->|         |
+   |  or your      |=====|   |  - whisper --> Ollama -->   |         |
+   |  mobile via   |PSTN |   |    Piper, all local         |         |
+   |  a rented DID)|     |   +-----------------------------+         |
+   +---------------+     |                                           |
+                         |   +-----------------------------+         |
    | SMS gateway   |HTTPS|   | sms.daemon  / sms.poll      |         |
    |  (webhook or  |====>|   |   - parse, validate, spool  |         |
    |   poll API)   |     |   +--------------+--------------+         |
@@ -104,6 +116,40 @@ sudo install/build-pjsip.sh     # builds pjproject with TLS + SRTP, then verifie
 ./bin/phone sip                 # register and wait for calls
 ./bin/phone sip -- 'sip:+15550100...@sip.telnyx.com;transport=tls'
 ```
+
+## Quickstart: the agent, on your own phone line
+
+No account, no DID, nothing rented: a free SIP app on the same network can talk
+to a local model on extension 600.
+
+```bash
+cp voice/voice.conf.example ~/.config/phone/voice.conf
+$EDITOR ~/.config/phone/voice.conf       # set [dial] owner to your own number
+
+ollama pull gemma4:26b                   # ~15 GB at Q4; fits a 24 GB GPU
+pip install faster-whisper piper-tts
+python -m piper.download_voices en_US-amy-medium
+./bin/phone voice modelfile && ollama create phone-voice -f ~/.config/phone/Modelfile
+
+./bin/phone voice doctor                 # models, GPU, config, what is missing
+./bin/phone voice dial-test              # 911 and every non-owner number must be refused
+./bin/phone voice demo                   # the whole pipeline with no models at all
+./bin/phone voice provision --dir ~/asterisk-conf
+sudo cp ~/asterisk-conf/{pjsip,extensions,rtp}.conf /etc/asterisk/
+sudo systemctl restart asterisk
+./bin/phone voice serve                  # then dial 600 from your SIP app
+```
+
+Extension 601 on the same dialplan is a plain echo test: if 601 sounds bad, the
+problem is audio, not the model. Extension 600 is the agent.
+
+Latency is measured per stage, not assumed — `./bin/phone voice simulate --in
+yours.wav` runs your own recording through the real whisper/Ollama/Piper stack
+and prints where the milliseconds went. What is free (the entire model half) and
+what is not (PSTN interconnect, a few dollars a month at most) is set out in
+[`docs/VOICE.md`](docs/VOICE.md), along with the VoLTE answer: a server cannot
+hold VoLTE — that identity lives in your SIM — so a real mobile number means a
+rented DID and an ordinary bridged call.
 
 ### Wiring the three pieces together
 
@@ -250,6 +296,15 @@ phone sip provision --provider telnyx|flowroute|twilio|asterisk \
 phone sip check | doctor [--audio] | test-tls | print
 phone sip                                 # register;  phone sip -- 'sip:num@host;transport=tls'
                                           # (pjsua options go after --: --capture-dev N)
+phone voice doctor                        # the agent: models, GPU, dial safety, gaps
+phone voice demo | simulate | ask         # offline pipeline, real stack, one prompt
+phone voice modelfile [--base M]          # phone-tuned Ollama model (sets num_ctx)
+phone voice provision [--dir D]           # Asterisk pjsip/extensions/rtp + trunk stub
+phone voice serve [--once]                # answer calls (Asterisk connects here)
+phone voice call --to owner [--dry-run]   # ring the owner with the agent on the line
+phone voice dial-test                     # 911/non-owner numbers must be refused
+phone voice transcript [--list] [--tail N]
+
 phone firewall [--sip-host H] [--sms-host H] [--resolver IP] [--wg-port N]
                [--rtp-range A-B] [--panic-timeout N] [--dry-run|--status|--unblock|--rollback|--confirm]
 phone doctor        # preflight for the whole system: text, voice, firewall
@@ -281,8 +336,8 @@ threat model, including the honest gaps, is in `docs/HARDENING.md`.
 PHONE_PYTHON=/usr/bin/python3 ./tests/run.sh
 ```
 
-Four suites, 265 assertions, none of which need root, a provider, or network
-access:
+Eight suites, 386 assertions, none of which need root, a provider, network
+access, a GPU, or an installed model:
 
 | Suite | Covers |
 | --- | --- |
@@ -293,6 +348,10 @@ access:
 | `tests/test_sip.sh` | config linter against pjsua's exact `long_options[]`, the parser-compatibility rules (no `\;`, no bare `#`, 200-byte lines), each launcher refusal, provisioning, and doctor |
 | `tests/test_firewall.sh` | generated policy shape, "no unpinned destination" property, refusals |
 | `tests/test_e2e.sh` | real daemon + real HTTP + real CLI, byte-identical body, UTF-8, auth |
+| `tests/test_voice_audio.py` | resampling (streamed output byte-identical to one-shot), VAD segmentation, WAV I/O, DTMF tone pairs, level maths |
+| `tests/test_voice_protocol.py` | AudioSocket framing byte by byte, a real socket with a fake Asterisk, call limits, hangup handling, a crashing handler not killing the server |
+| `tests/test_voice_pipeline.py` | turn-taking, barge-in keeping the interrupting audio, real-time pacing, hangup detection, transcript, dial safety (including prompt injection), the Ollama client against a fake HTTP server |
+| `tests/test_voice_cli.py` | config loading and refusals, the Asterisk generator (SRTP not optimistic, no `0.0.0.0/0` identify, the owner number literal and no PSTN wildcard), every `voice` subcommand, and a one-call `serve` against a fake Asterisk |
 
 ## Layout
 
@@ -314,7 +373,8 @@ sms/sms.conf.example   documented configuration
 firewall/lockdown.sh   default-deny ruleset, nftables or iptables
 systemd/               sandboxed units for the receiver and the poller
 install/build-pjsip.sh pjproject build that verifies TLS+SRTP afterwards
-docs/                  FORMAT.md, HARDENING.md, PROVIDERS.md
+voice/                 the local agent: AudioSocket, pipeline, Asterisk generator
+docs/                  FORMAT.md, HARDENING.md, PROVIDERS.md, VOICE.md
 tests/                 four suites + tests/run.sh
 ```
 
@@ -334,6 +394,25 @@ in this environment.** The provider templates are built from vendor
 documentation; `sip/providers/twilio.conf` is explicitly marked unverified. Run
 `phone sip doctor --audio` and `phone sip test-tls` on your host first — they
 exist to turn the last mile into a sequence of yes/no answers.
+
+Voice agent: implemented, and tested harder than the rest of the project, because
+a language model on a phone line is the one component that can act on the world.
+The AudioSocket protocol, the call server, the session loop (greeting, turn
+detection, barge-in, hangup detection), the Asterisk configuration generator, the
+Ollama client, the transcript, and every dialling refusal are covered — including
+a fake Asterisk on a real socket, driven through `phone voice serve`. What is
+**not** covered: a live call, real audio, real echo, and real model latency.
+There is no sound card and no GPU here, so `phone voice doctor` reports the gaps
+and `voice simulate` exists to measure them on your machine. No live call has
+been placed by this code.
+
+The dialling rule is worth repeating: the model is never shown the owner's
+number, may only ever propose `[[dial:owner]]`, and `validate_dial_request()`
+allows exactly the configured destination. 911, 988, 999, 112, 000, 111, 110,
+118, 119, 144, the operator and the short service codes are refused before that
+comparison, the config loader refuses to accept one as the owner, and the
+generated dialplan contains the owner's number literally with no pattern that
+reaches the PSTN. `phone voice dial-test` proves it in a second.
 
 Firewall: implemented and tested in `--dry-run`, rule by rule, including the
 property that no rule reaches an unpinned destination. This environment has no

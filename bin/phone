@@ -13,6 +13,12 @@
 #   phone smsd [args]                  run the webhook receiver
 #   phone sms-poll [args]              run the puller
 #
+#   phone voice doctor                 the AI voice agent: what works, what cannot
+#   phone voice modelfile              build a phone-tuned Ollama model
+#   phone voice serve                  answer calls through Asterisk
+#   phone voice call --to owner        have the agent ring your phone
+#   phone voice dial-test              prove the model cannot dial strangers
+#
 #   phone firewall [args]              lockdown / unblock / status / rollback
 #   phone doctor                       preflight checks for the whole system
 #   phone status                       what is running right now
@@ -117,6 +123,16 @@ doctor() {
         say_warn "pjsua not installed (voice unavailable): see install/build-pjsip.sh"
     fi
 
+    printf '%svoice agent%s\n' "$C" "$N"
+    if py voice.cli doctor >/dev/null 2>&1; then
+        say_ok "voice agent: no blocking problems (phone voice doctor for detail)"
+    else
+        local agent_why
+        agent_why="$(py voice.cli doctor 2>&1 | grep -m1 -E '^  FAIL' | sed 's/^  FAIL //' || true)"
+        say_warn "voice agent not ready: ${agent_why:-run 'phone voice doctor'}"
+    fi
+    say_ok "safety: phone voice dial-test (911 and every non-owner number are refused)"
+
     printf '%sfirewall%s\n' "$C" "$N"
     if command -v nft >/dev/null 2>&1; then
         say_ok "nftables present"
@@ -169,6 +185,19 @@ status() {
     else
         printf '  voice    : not running (phone sip)\n'
     fi
+
+    if py voice.cli --help >/dev/null 2>&1; then
+        local bridge_port agent_pid
+        bridge_port="$(py -c 'from voice.config import VoiceConfig; print(VoiceConfig.load().port)' 2>/dev/null || echo 9092)"
+        agent_pid="$(pgrep -f 'voice.cli serve' 2>/dev/null | head -1 || true)"
+        if [ -n "$agent_pid" ]; then
+            printf '  agent    : serving on port %s (pid %s)\n' "$bridge_port" "$agent_pid"
+        else
+            printf '  agent    : not running (phone voice serve -> port %s)\n' "$bridge_port"
+        fi
+    else
+        printf '  agent    : not available\n'
+    fi
 }
 
 # --------------------------------------------------------------------------
@@ -178,7 +207,8 @@ cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
-    sip|voice)     exec "$REPO_DIR/sip/phone.sh" "$@" ;;
+    sip)           exec "$REPO_DIR/sip/phone.sh" "$@" ;;
+    voice|agent)   exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m voice.cli "$@" ;;
     sms)           exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.cli "$@" ;;
     smsd|smsd-*|receiver) exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.daemon "$@" ;;
     sms-poll|poll) exec env PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m sms.poll "$@" ;;

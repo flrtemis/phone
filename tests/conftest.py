@@ -6,8 +6,9 @@ import http.client
 import json
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import pytest
 
@@ -111,3 +112,88 @@ def daemon(daemon_factory: Callable[..., Any]) -> Client:
 def auth_daemon(daemon_factory: Callable[..., Any]) -> Client:
     client, _cfg, _thread = daemon_factory(token="s3cret-token")
     return client
+
+
+# ---------------------------------------------------------------------------
+# A fake Ollama: the real HTTP protocol, no model, no network, no GPU.
+# ---------------------------------------------------------------------------
+class FakeOllama(BaseHTTPRequestHandler):
+    models: list[dict] = [{"name": "gemma4:26b"}, {"name": "gemma4:31b"}]
+    requests: list[dict] = []
+    deltas: list[str] = ["Hello", " from", " your", " machine."]
+    fail_with: str = ""
+
+    def log_message(self, *args: Any) -> None:  # keep test output readable
+        pass
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server's naming
+        if self.path == "/api/tags":
+            self._json({"models": FakeOllama.models})
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        FakeOllama.requests.append({"path": self.path, "payload": payload})
+        if self.path == "/api/generate":
+            self._json({"response": "One short answer.", "done": True})
+            return
+        if self.path != "/api/chat":
+            self._json({"error": "not found"}, 404)
+            return
+        if FakeOllama.fail_with:
+            self._json({"error": FakeOllama.fail_with})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        for delta in FakeOllama.deltas:
+            self.wfile.write((json.dumps({"message": {"content": delta}, "done": False}) + "\n").encode())
+            self.wfile.flush()
+        self.wfile.write((json.dumps({"message": {"content": ""}, "done": True}) + "\n").encode())
+
+
+class FakeOllamaControl:
+    """Handle on the fake server, so a test can change what the model 'says'."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    @property
+    def requests(self) -> list[dict]:
+        """Every request the model received, in order. Do not import the class
+        from a test module: pytest loads conftest.py under a different name, and
+        the two module objects would each have their own list."""
+        return FakeOllama.requests
+
+    def set_deltas(self, *deltas: str) -> "FakeOllamaControl":
+        FakeOllama.deltas = list(deltas)
+        return self
+
+    def fail(self, message: str) -> "FakeOllamaControl":
+        FakeOllama.fail_with = message
+        return self
+
+
+@pytest.fixture()
+def fake_ollama_url() -> Iterator[FakeOllamaControl]:
+    FakeOllama.models = [{"name": "gemma4:26b"}, {"name": "gemma4:31b"}]
+    FakeOllama.requests = []
+    FakeOllama.deltas = ["Hello", " from", " your", " machine."]
+    FakeOllama.fail_with = ""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield FakeOllamaControl(f"http://127.0.0.1:{server.server_address[1]}")
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)

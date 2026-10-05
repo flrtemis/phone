@@ -45,7 +45,8 @@ fi
 
 info "installing $REPO_DIR -> $PREFIX"
 mkdir -p "$PREFIX" "$BINDIR"
-cp -a "$REPO_DIR/bin" "$REPO_DIR/sms" "$REPO_DIR/sip" "$REPO_DIR/firewall" \
+cp -a "$REPO_DIR/bin" "$REPO_DIR/sms" "$REPO_DIR/sip" "$REPO_DIR/voice" \
+      "$REPO_DIR/firewall" \
       "$REPO_DIR/docs" "$REPO_DIR/systemd" "$REPO_DIR/install" \
       "$REPO_DIR/README.md" "$REPO_DIR/Makefile" "$PREFIX/"
 cp -a "$REPO_DIR/tests" "$PREFIX/" 2>/dev/null || true

@@ -39,7 +39,7 @@ doctor:
 install:
 	@[ "$$(id -u)" = "0" ] || { echo "make install needs root (sudo make install)" >&2; exit 1; }
 	install -d "$(PREFIX)"
-	cp -a bin sms sip firewall docs systemd install README.md Makefile "$(PREFIX)/"
+	cp -a bin sms sip voice firewall docs systemd install README.md Makefile "$(PREFIX)/"
 	install -d "$(BINDIR)"
 	ln -sf "$(PREFIX)/bin/phone" "$(BINDIR)/phone"
 	@echo "installed to $(PREFIX); run 'phone doctor'"

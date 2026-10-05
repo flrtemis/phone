@@ -1,0 +1,121 @@
+# phone voice agent - configuration
+#
+#   mkdir -p ~/.config/phone && cp voice.conf.example ~/.config/phone/voice.conf
+#   phone voice doctor
+#
+# Every value below is a default except the ones marked REQUIRED. Anything left
+# commented out keeps the default, so a config file with only [dial] owner set is
+# perfectly usable. Environment variables (PHONE_VOICE_*) override this file for
+# one-off runs, which is how the tests avoid touching your real config.
+#
+# The stack:
+#   Asterisk --AudioSocket--> us --> whisper (ASR) --> Ollama (LLM) --> Piper (TTS)
+#
+# It runs on one machine. Nothing leaves it, except a call you place yourself.
+
+[bridge]
+# Where we listen for Asterisk. Asterisk dials *out* to this address, so
+# 127.0.0.1 is correct when both run on the same host. Changing this to 0.0.0.0
+# requires allow_public_bind = true, and a firewall rule limiting the port to the
+# PBX: the socket carries raw audio with no authentication at all.
+host = 127.0.0.1
+port = 9092
+max_calls = 2
+allow_public_bind = false
+
+[asr]
+# whisper (faster-whisper, CUDA if present) or echo (transcribes nothing; tests)
+backend = whisper
+# small.en is the latency sweet spot for 8 kHz speech. medium.en is noticeably
+# better on names and numbers and noticeably slower; try both with `simulate`.
+model = small.en
+device = auto          # auto | cuda | cpu
+compute = auto         # auto -> float16 on cuda, int8 on cpu
+language = en
+
+[llm]
+backend = ollama
+# 26b is a mixture-of-experts: 26B parameters, about 4B active per token, so it
+# answers at roughly the speed of a 4B model with much better comprehension.
+# 31b is dense and better for between-call reasoning, but on a call it is slower
+# for no conversational gain. One 24 GB GPU holds either at Q4.
+model = gemma4:26b
+url = http://127.0.0.1:11434
+temperature = 0.6
+# Hard ceiling on reply length. Spoken replies are one or two sentences; a longer
+# answer is a bug, and this is the cheapest way to bound the latency of one.
+max_tokens = 120
+timeout = 30.0
+
+[tts]
+# piper is local neural speech, one process per utterance, ~100-300 ms for a
+# sentence on a modern CPU. `wav` plays a fixed file instead (useful as a
+# placeholder voice), and `beep` emits a tone per sentence - not speech, but the
+# quickest way to prove the media path works before installing Piper.
+backend = piper
+binary = piper
+model = ~/.local/share/piper/en_US-amy-medium.onnx
+sample_rate = 22050
+speed = 1.0
+# With backend = wav, this is the file that gets played for every sentence.
+fallback_wav =
+
+[conversation]
+# Keep the greeting short. Every second of greeting is a second before the
+# caller can be understood, and this is a phone call, not a voicemail menu.
+greeting = Hello, this is your local assistant. Go ahead.
+farewell = Goodbye.
+# Blank means use the tuned prompt from voice/modelfile.py.
+system_prompt =
+hangup_phrases = goodbye,hang up,end the call,that's all,thats all
+max_turns = 60
+max_call_seconds = 900
+# Silence with no speech at all: hang up rather than hold the line forever.
+silence_timeout = 12
+# How many exchanges the model remembers. Each one costs prompt tokens, which is
+# time: the KV cache grows and the first token arrives later.
+history_turns = 12
+
+[barge_in]
+# Interrupt the agent by talking. Without this a phone agent feels dead, and
+# callers talk over it, which then transcribes as two overlapping speakers.
+enabled = true
+# RMS level above which a frame counts as speech. Lower it on a quiet line,
+# raise it on a noisy one; `doctor` reports the level it sees.
+threshold = 700
+# Consecutive loud frames needed before the agent stops. Three frames is 60 ms,
+# which is short enough to feel instant and long enough to ignore a click.
+frames = 3
+
+[dial]
+# REQUIRED FOR OUTBOUND CALLS. The one number the agent may ever dial - your own
+# phone. The model cannot see or change it, and every other number, including
+# 911, is refused in code before any dial plan is reached.
+#
+# Leave empty and outbound dialling is disabled entirely (inbound still works).
+owner =
+# Where outbound calls are sent. Empty means the built-in `asterisk -rx` command:
+#   asterisk -rx "channel originate PJSIP/<owner>@trunk-provider application AudioSocket <uuid>,HOST,PORT"
+originate_command =
+# If a dial is refused, tell the caller so (without revealing the owner number).
+speak_refusal = true
+
+[logging]
+# One JSONL file per call: every turn with a timestamp, plus the timings.
+transcripts = ~/voice/transcripts
+
+[asterisk]
+# Where `phone voice provision` writes, and where `doctor` looks.
+dir = /etc/asterisk
+# Your SIP app's extension and password. Generate the password with
+# `phone voice provision` (or set it to the one in your app's settings).
+handset_extension = 100
+handset_name = phone
+handset_password =
+# Dial this from the handset to reach the agent.
+ai_extension = 600
+tls_dir = ~/.config/phone/tls
+# RTP ports for media. Budget 4 ports per call (RTP + RTCP, bidirectional).
+# Must match the firewall rule exactly.
+rtp_start = 4000
+rtp_end = 4010
